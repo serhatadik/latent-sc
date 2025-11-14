@@ -19,5 +19,5 @@ def check_consistency(json_file_path):
 
 
 # Check the data
-a = check_consistency("data.json")
+a = check_consistency("../processed_data/data.json")
 print(a)
