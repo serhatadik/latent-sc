@@ -12,12 +12,12 @@ def find_indices_outside(arr, a, b):
     indices = [i for i, x in enumerate(arr) if not (a < x < b)]
     return indices
 
-folders = ['../data/data/stat_rot/'+name for name in os.listdir('../data/data/stat_rot/') if name.startswith('stat')]
+folders = ['../raw_data/stat_rot/'+name for name in os.listdir('../raw_data/stat_rot/') if name.startswith('stat')]
 
-gps_files = [name for name in os.listdir('../data/gps_data/stat_rot/') if name.endswith('Stat.txt')]
+gps_files = [name for name in os.listdir('../raw_data/gps_data/stat_rot/') if name.endswith('Stat.txt')]
 gps_datas = []
 for gps_file in gps_files:
-    gps_datas.append(pd.read_csv(os.path.join('../data/gps_data/stat_rot/', gps_file)))
+    gps_datas.append(pd.read_csv(os.path.join('../raw_data/gps_data/stat_rot/', gps_file)))
 gps_data = pd.concat(gps_datas, axis=0)
 
 gps_times = np.array(pd.to_datetime(gps_data['date time']) - np.timedelta64(6, 'h'), dtype='datetime64[s]')
@@ -131,12 +131,12 @@ for i, time in enumerate(times):
     if i%1000==0:
         print(i/len(times))
 
-np.save("../files_generated_by_process_data_scripts/TX1EBC_pow_stat.npy", TX1EBC_Pow)
-np.save("../files_generated_by_process_data_scripts/TX1Ustar_pow_stat.npy", TX1Ustar_Pow)
-np.save("../files_generated_by_process_data_scripts/TX2_pow_stat.npy", TX2_Pow)
-np.save("../files_generated_by_process_data_scripts/TX3_pow_stat.npy", TX3_Pow)
-np.save("../files_generated_by_process_data_scripts/TX4_pow_stat.npy", TX4_Pow)
-np.save("../files_generated_by_process_data_scripts/TX5_pow_stat.npy", TX5_Pow)
-np.save("../files_generated_by_process_data_scripts/coordinates_stat.npy", coordinates)
-np.save("../files_generated_by_process_data_scripts/coordinates_ebc_stat.npy", coordinates_ebc)
-np.save("../files_generated_by_process_data_scripts/coordinates_ustar_stat.npy", coordinates_ustar)
+np.save("files_generated_by_process_data_scripts/TX1EBC_pow_stat.npy", TX1EBC_Pow)
+np.save("files_generated_by_process_data_scripts/TX1Ustar_pow_stat.npy", TX1Ustar_Pow)
+np.save("files_generated_by_process_data_scripts/TX2_pow_stat.npy", TX2_Pow)
+np.save("files_generated_by_process_data_scripts/TX3_pow_stat.npy", TX3_Pow)
+np.save("files_generated_by_process_data_scripts/TX4_pow_stat.npy", TX4_Pow)
+np.save("files_generated_by_process_data_scripts/TX5_pow_stat.npy", TX5_Pow)
+np.save("files_generated_by_process_data_scripts/coordinates_stat.npy", coordinates)
+np.save("files_generated_by_process_data_scripts/coordinates_ebc_stat.npy", coordinates_ebc)
+np.save("files_generated_by_process_data_scripts/coordinates_ustar_stat.npy", coordinates_ustar)

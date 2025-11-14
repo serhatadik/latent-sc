@@ -6,14 +6,14 @@ def find_unique_lists(list_of_lists):
     unique_lists = set(tuple(lst) for lst in list_of_lists)
     return [list(tpl) for tpl in unique_lists]
 
-tx2_ustar = np.load("../files_generated_by_process_data_scripts/TX1Ustar_pow_rot.npy")
-tx3 = np.load("../files_generated_by_process_data_scripts/TX2_pow_rot.npy")
-tx4 = np.load("../files_generated_by_process_data_scripts/TX3_pow_rot.npy")
-tx5 = np.load("../files_generated_by_process_data_scripts/TX4_pow_rot.npy")
-tx6 = np.load("../files_generated_by_process_data_scripts/TX5_pow_rot.npy")
+tx2_ustar = np.load("files_generated_by_process_data_scripts/TX1Ustar_pow_rot.npy")
+tx3 = np.load("files_generated_by_process_data_scripts/TX2_pow_rot.npy")
+tx4 = np.load("files_generated_by_process_data_scripts/TX3_pow_rot.npy")
+tx5 = np.load("files_generated_by_process_data_scripts/TX4_pow_rot.npy")
+tx6 = np.load("files_generated_by_process_data_scripts/TX5_pow_rot.npy")
 
-coord = np.load("../files_generated_by_process_data_scripts/coordinates_rot.npy")
-coord_ustar = np.load("../files_generated_by_process_data_scripts/coordinates_ustar_rot.npy")
+coord = np.load("files_generated_by_process_data_scripts/coordinates_rot.npy")
+coord_ustar = np.load("files_generated_by_process_data_scripts/coordinates_ustar_rot.npy")
 
 
 guesthousedd = (40.76749, -111.83607)

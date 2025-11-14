@@ -3,19 +3,19 @@ import numpy as np
 from geopy import distance
 
 
-tx1_ebc = np.load("../files_generated_by_process_data_scripts/TX1EBC_pow_test.npy")
-tx2 = np.load("../files_generated_by_process_data_scripts/TX2_pow_test.npy")
-tx3 = np.load("../files_generated_by_process_data_scripts/TX3_pow_test.npy")
-tx4 = np.load("../files_generated_by_process_data_scripts/TX4_pow_test.npy")
-tx5 = np.load("../files_generated_by_process_data_scripts/TX5_pow_test.npy")
+tx1_ebc = np.load("files_generated_by_process_data_scripts/TX1EBC_pow_test.npy")
+tx2 = np.load("files_generated_by_process_data_scripts/TX2_pow_test.npy")
+tx3 = np.load("files_generated_by_process_data_scripts/TX3_pow_test.npy")
+tx4 = np.load("files_generated_by_process_data_scripts/TX4_pow_test.npy")
+tx5 = np.load("files_generated_by_process_data_scripts/TX5_pow_test.npy")
 
 tx2 = tx2[:, np.newaxis]
 tx3 = tx3[:, np.newaxis]
 tx4 = tx4[:, np.newaxis]
 tx5 = tx5[:, np.newaxis]
 
-coord = np.load("../files_generated_by_process_data_scripts/coordinates_test.npy")
-coord_ebc = np.load("../files_generated_by_process_data_scripts/coordinates_ebc_test.npy")
+coord = np.load("files_generated_by_process_data_scripts/coordinates_test.npy")
+coord_ebc = np.load("files_generated_by_process_data_scripts/coordinates_ebc_test.npy")
 print(tx2.shape)
 print(tx2[0])
 print(coord.shape)

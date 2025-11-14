@@ -12,7 +12,7 @@ def find_indices_outside(arr, a, b):
     indices = [i for i, x in enumerate(arr) if not (a < x < b)]
     return indices
 
-gps_serhat_files = ['../data/gps_data_serhat/'+name for name in os.listdir('../data/gps_data_serhat/') if name.startswith('2023') ]
+gps_serhat_files = ['../raw_data/gps_data_serhat/'+name for name in os.listdir('../raw_data/gps_data_serhat/') if name.startswith('2023') ]
 
 coords_serhat = dict()
 
@@ -26,12 +26,12 @@ for gps_serhat_file in gps_serhat_files:
                 #print('Point at ({0},{1}) -> {2}'.format(point.latitude, point.longitude, np.array(pd.to_datetime(point.time) - np.timedelta64(6, 'h'), dtype='datetime64[s]')))
                 coords_serhat[np.datetime64(pd.to_datetime(point.time) - np.timedelta64(6, 'h')).astype('datetime64[s]')] = np.array([point.longitude, point.latitude])
 
-folders = ['../data/data/walking/'+name for name in os.listdir('../data/data/walking/') if name.startswith('samples_20') ]
-folders += ['../data/data/driving/'+name for name in os.listdir('../data/data/driving/') if name.startswith('samples_20') ]
-gps_files = [name for name in os.listdir('../data/gps_data/all_gps_data/') if name.endswith('.txt')]
+folders = ['../raw_data/walking/'+name for name in os.listdir('../raw_data/walking/') if name.startswith('samples_20') ]
+folders += ['../raw_data/driving/'+name for name in os.listdir('../raw_data/driving/') if name.startswith('samples_20') ]
+gps_files = [name for name in os.listdir('../raw_data/gps_data/all_gps_data/') if name.endswith('.txt')]
 gps_datas = []
 for gps_file in gps_files:
-    gps_datas.append(pd.read_csv(os.path.join('../data/gps_data/all_gps_data/', gps_file)))
+    gps_datas.append(pd.read_csv(os.path.join('../raw_data/gps_data/all_gps_data/', gps_file)))
 gps_data = pd.concat(gps_datas, axis=0)
 
 gps_times = np.array(pd.to_datetime(gps_data['date time']) - np.timedelta64(6, 'h'), dtype='datetime64[s]')
@@ -240,13 +240,13 @@ for i, time in enumerate(times):
         print(i/len(times))
 
 
-np.save("../files_generated_by_process_data_scripts/TX1EBC_pow_test.npy", TX1EBC_Pow)
-np.save("../files_generated_by_process_data_scripts/TX1Ustar_pow_test.npy", TX1Ustar_Pow)
-np.save("../files_generated_by_process_data_scripts/TX2_pow_test.npy", TX2_Pow)
-np.save("../files_generated_by_process_data_scripts/TX3_pow_test.npy", TX3_Pow)
-np.save("../files_generated_by_process_data_scripts/TX4_pow_test.npy", TX4_Pow)
-np.save("../files_generated_by_process_data_scripts/TX5_pow_test.npy", TX5_Pow)
+np.save("files_generated_by_process_data_scripts/TX1EBC_pow_test.npy", TX1EBC_Pow)
+np.save("files_generated_by_process_data_scripts/TX1Ustar_pow_test.npy", TX1Ustar_Pow)
+np.save("files_generated_by_process_data_scripts/TX2_pow_test.npy", TX2_Pow)
+np.save("files_generated_by_process_data_scripts/TX3_pow_test.npy", TX3_Pow)
+np.save("files_generated_by_process_data_scripts/TX4_pow_test.npy", TX4_Pow)
+np.save("files_generated_by_process_data_scripts/TX5_pow_test.npy", TX5_Pow)
 
-np.save("../files_generated_by_process_data_scripts/coordinates_test.npy", coordinates)
-np.save("../files_generated_by_process_data_scripts/coordinates_ebc_test.npy", coordinates_ebc)
-np.save("../files_generated_by_process_data_scripts/coordinates_ustar_test.npy", coordinates_ustar)
+np.save("files_generated_by_process_data_scripts/coordinates_test.npy", coordinates)
+np.save("files_generated_by_process_data_scripts/coordinates_ebc_test.npy", coordinates_ebc)
+np.save("files_generated_by_process_data_scripts/coordinates_ustar_test.npy", coordinates_ustar)

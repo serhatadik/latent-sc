@@ -3,17 +3,17 @@ import numpy as np
 from geopy import distance
 
 
-tx1_ebc = np.load("../files_generated_by_process_data_scripts/TX1EBC_pow_test.npy")
-tx2_ustar = np.load("../files_generated_by_process_data_scripts/TX1Ustar_pow_test.npy")
-tx3 = np.load("../files_generated_by_process_data_scripts/TX2_pow_test.npy")
-tx4 = np.load("../files_generated_by_process_data_scripts/TX3_pow_test.npy")
-tx5 = np.load("../files_generated_by_process_data_scripts/TX4_pow_test.npy")
-tx6 = np.load("../files_generated_by_process_data_scripts/TX5_pow_test.npy")
+tx1_ebc = np.load("files_generated_by_process_data_scripts/TX1EBC_pow_test.npy")
+tx2_ustar = np.load("files_generated_by_process_data_scripts/TX1Ustar_pow_test.npy")
+tx3 = np.load("files_generated_by_process_data_scripts/TX2_pow_test.npy")
+tx4 = np.load("files_generated_by_process_data_scripts/TX3_pow_test.npy")
+tx5 = np.load("files_generated_by_process_data_scripts/TX4_pow_test.npy")
+tx6 = np.load("files_generated_by_process_data_scripts/TX5_pow_test.npy")
 
 
-coord = np.load("../files_generated_by_process_data_scripts/coordinates_test.npy")
-coord_ebc = np.load("../files_generated_by_process_data_scripts/coordinates_ebc_test.npy")
-coord_ustar = np.load("../files_generated_by_process_data_scripts/coordinates_ustar_test.npy")
+coord = np.load("files_generated_by_process_data_scripts/coordinates_test.npy")
+coord_ebc = np.load("files_generated_by_process_data_scripts/coordinates_ebc_test.npy")
+coord_ustar = np.load("files_generated_by_process_data_scripts/coordinates_ustar_test.npy")
 
 ebcdd = (40.76702, -111.83807)
 guesthousedd = (40.76749, -111.83607)

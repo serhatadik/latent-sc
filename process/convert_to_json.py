@@ -13,7 +13,7 @@ def find_indices_outside(arr, a, b):
     indices = [i for i, x in enumerate(arr) if not (a < x < b)]
     return indices
 
-gps_serhat_files = ['../data/gps_data_serhat/'+name for name in os.listdir('../data/gps_data_serhat/') if name.startswith('2023') ]
+gps_serhat_files = ['../raw_data/gps_data_serhat/'+name for name in os.listdir('../raw_data/gps_data_serhat/') if name.startswith('2023') ]
 
 coords_serhat = dict()
 
@@ -27,12 +27,12 @@ for gps_serhat_file in gps_serhat_files:
                 #print('Point at ({0},{1}) -> {2}'.format(point.latitude, point.longitude, np.array(pd.to_datetime(point.time) - np.timedelta64(6, 'h'), dtype='datetime64[s]')))
                 coords_serhat[np.datetime64(pd.to_datetime(point.time) - np.timedelta64(6, 'h')).astype('datetime64[s]')] = np.array([point.longitude, point.latitude])
 
-folders = ['../data/data/walking/'+name for name in os.listdir('../data/data/walking/') if name.startswith('samples_20') ]
-folders += ['../data/data/driving/'+name for name in os.listdir('../data/data/driving/') if name.startswith('samples_20') ]
-gps_files = [name for name in os.listdir('../data/gps_data/all_gps_data/') if name.endswith('.txt')]
+folders = ['../raw_data/walking/'+name for name in os.listdir('../raw_data/walking/') if name.startswith('samples_20') ]
+folders += ['../raw_data/driving/'+name for name in os.listdir('../raw_data/driving/') if name.startswith('samples_20') ]
+gps_files = [name for name in os.listdir('../raw_data/gps_data/all_gps_data/') if name.endswith('.txt')]
 gps_datas = []
 for gps_file in gps_files:
-    gps_datas.append(pd.read_csv(os.path.join('../data/gps_data/all_gps_data/', gps_file)))
+    gps_datas.append(pd.read_csv(os.path.join('../raw_data/gps_data/all_gps_data/', gps_file)))
 gps_data = pd.concat(gps_datas, axis=0)
 
 gps_times = pd.to_datetime(gps_data['date time'], format='mixed') - pd.Timedelta(hours=6)
@@ -73,16 +73,16 @@ for folder in folders:
 times = sorted(list(data.keys()))
 fig, axs = plt.subplots(1,2)
 
-tx1_ebc = np.load("../files_generated_by_process_data_scripts/TX1EBC_pow_test.npy")
-tx2_ustar = np.load("../files_generated_by_process_data_scripts/TX1Ustar_pow_test.npy")
-tx3 = np.load("../files_generated_by_process_data_scripts/TX2_pow_test.npy")
-tx4 = np.load("../files_generated_by_process_data_scripts/TX3_pow_test.npy")
-tx5 = np.load("../files_generated_by_process_data_scripts/TX4_pow_test.npy")
-tx6 = np.load("../files_generated_by_process_data_scripts/TX5_pow_test.npy")
+tx1_ebc = np.load("files_generated_by_process_data_scripts/TX1EBC_pow_test.npy")
+tx2_ustar = np.load("files_generated_by_process_data_scripts/TX1Ustar_pow_test.npy")
+tx3 = np.load("files_generated_by_process_data_scripts/TX2_pow_test.npy")
+tx4 = np.load("files_generated_by_process_data_scripts/TX3_pow_test.npy")
+tx5 = np.load("files_generated_by_process_data_scripts/TX4_pow_test.npy")
+tx6 = np.load("files_generated_by_process_data_scripts/TX5_pow_test.npy")
 
-coord = np.load("../files_generated_by_process_data_scripts/coordinates_test.npy")
-coord_ebc = np.load("../files_generated_by_process_data_scripts/coordinates_ebc_test.npy")
-coord_ustar = np.load("../files_generated_by_process_data_scripts/coordinates_ustar_test.npy")
+coord = np.load("files_generated_by_process_data_scripts/coordinates_test.npy")
+coord_ebc = np.load("files_generated_by_process_data_scripts/coordinates_ebc_test.npy")
+coord_ustar = np.load("files_generated_by_process_data_scripts/coordinates_ustar_test.npy")
 
 ebcdd = (40.76702, -111.83807)
 guesthousedd = (40.76749, -111.83607)

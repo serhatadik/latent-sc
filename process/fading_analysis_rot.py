@@ -12,12 +12,12 @@ def find_indices_outside(arr, a, b):
     indices = [i for i, x in enumerate(arr) if not (a < x < b)]
     return indices
 
-folders = ['../data/data/stat_rot/'+name for name in os.listdir('../data/data/stat_rot/') if name.startswith('rot')]
+folders = ['../raw_data/stat_rot/'+name for name in os.listdir('../raw_data/stat_rot/') if name.startswith('rot')]
 
-gps_files = [name for name in os.listdir('../data/gps_data/stat_rot/') if name.endswith('Rot.txt')]
+gps_files = [name for name in os.listdir('../raw_data/gps_data/stat_rot/') if name.endswith('Rot.txt')]
 gps_datas = []
 for gps_file in gps_files:
-    gps_datas.append(pd.read_csv(os.path.join('../data/gps_data/stat_rot/', gps_file)))
+    gps_datas.append(pd.read_csv(os.path.join('../raw_data/gps_data/stat_rot/', gps_file)))
 gps_data = pd.concat(gps_datas, axis=0)
 
 gps_times = np.array(pd.to_datetime(gps_data['date time']) - np.timedelta64(6, 'h'), dtype='datetime64[s]')
@@ -126,10 +126,10 @@ for i, time in enumerate(times):
     if i%1000==0:
         print(i/len(times))
 
-np.save("../files_generated_by_process_data_scripts/TX1Ustar_pow_rot.npy", TX1Ustar_Pow)
-np.save("../files_generated_by_process_data_scripts/TX2_pow_rot.npy", TX2_Pow)
-np.save("../files_generated_by_process_data_scripts/TX3_pow_rot.npy", TX3_Pow)
-np.save("../files_generated_by_process_data_scripts/TX4_pow_rot.npy", TX4_Pow)
-np.save("../files_generated_by_process_data_scripts/TX5_pow_rot.npy", TX5_Pow)
-np.save("../files_generated_by_process_data_scripts/coordinates_rot.npy", coordinates)
-np.save("../files_generated_by_process_data_scripts/coordinates_ustar_rot.npy", coordinates_ustar)
+np.save("files_generated_by_process_data_scripts/TX1Ustar_pow_rot.npy", TX1Ustar_Pow)
+np.save("files_generated_by_process_data_scripts/TX2_pow_rot.npy", TX2_Pow)
+np.save("files_generated_by_process_data_scripts/TX3_pow_rot.npy", TX3_Pow)
+np.save("files_generated_by_process_data_scripts/TX4_pow_rot.npy", TX4_Pow)
+np.save("files_generated_by_process_data_scripts/TX5_pow_rot.npy", TX5_Pow)
+np.save("files_generated_by_process_data_scripts/coordinates_rot.npy", coordinates)
+np.save("files_generated_by_process_data_scripts/coordinates_ustar_rot.npy", coordinates_ustar)
