@@ -1,0 +1,87 @@
+# Configuration Parameters for Spectrum Occupancy Analysis
+# Based on Table I from paper: "Georeferenced Spectrum Occupancy Analysis"
+
+# Spatial Parameters
+spatial:
+  proxel_size: 5                # rp: Proxel width & height [m]
+  map_width: 2900               # w: Overall map width [m]
+  map_height: 2600              # h: Overall map height [m]
+  downsample_factor: 10         # Downsampling from original 0.5m resolution
+
+# Localization Parameters
+localization:
+  correlation_coeff: 400        # δc: Spatial correlation coefficient [m]
+  std_deviation: 4.5            # σ: Standard deviation [dB]
+  path_loss_exponent: 2         # np: Path loss exponent
+  reference_distance: 1         # di0: Reference distance [m]
+  reference_power: 0            # pi0: Reference power [dB]
+
+# Confidence Level Parameters
+confidence:
+  max_distance: 1000            # dmax: Max distance from observed proxel [m]
+  steepness: 0.01               # α: Steepness parameter [1/m]
+
+# Data Processing
+data:
+  cutoff_date: "2023-01-01"     # Only use data after this date
+  num_sensors: 10               # Number of monitoring sensors
+  base_path: "./data/raw/rfbaseline/"    # Path to spectrum monitoring data
+
+# Temporal Analysis
+temporal:
+  time_of_day:
+    morning: ["04:00:00", "12:00:00"]
+    afternoon: ["12:00:00", "20:00:00"]
+    night: ["20:00:00", "04:00:00"]
+
+  seasons:
+    spring: [3, 6]              # March to June
+    summer: [6, 9]              # June to September
+    autumn: [9, 12]             # September to December
+    winter: [0, 3]              # December to March
+
+# Frequency Bands
+# Key format: "start-end" in MHz
+frequency_bands:
+  "2160.5-2169.5":
+    start: 2160.5
+    end: 2169.5
+    threshold_start: -100
+    threshold_end: -100
+    description: "AWS Band"
+
+  "3470-3510":
+    start: 3470
+    end: 3510
+    threshold_start: -105
+    threshold_end: -105
+    description: "CBRS C-band"
+
+  "3610-3650":
+    start: 3610
+    end: 3650
+    threshold_start: -105
+    threshold_end: -105
+    description: "CBRS GAA Band"
+
+# Regression Parameters
+regression:
+  polynomial_degree: 3          # Degree of polynomial features
+  lasso_alpha: 0.05             # Lasso regularization strength
+
+# Interpolation Parameters
+interpolation:
+  idw_power: 2                  # IDW power parameter
+  max_distance: 200             # Max distance for IDW [m]
+
+# Parallel Processing
+parallel:
+  num_cores: -1                 # -1 uses all available cores
+  batch_size: 100               # Batch size for joblib parallel processing
+  verbose: true                 # Show progress bars
+
+# Visualization
+visualization:
+  figure_dpi: 300               # DPI for saved figures
+  colormap: 'hot'               # Default colormap
+  font_family: 'Times New Roman'

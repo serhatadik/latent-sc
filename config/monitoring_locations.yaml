@@ -1,0 +1,34 @@
+# Monitoring Station Locations
+# Coordinates in pixel space after 10x downsampling
+# Format: [col, row] which corresponds to [x, y] or [UTM_E, UTM_N]
+
+data_points:
+  - name: "Bookstore"
+    coordinates: [96, 299]
+
+  - name: "EBC"
+    coordinates: [256, 376]
+
+  - name: "Guesthouse"
+    coordinates: [287, 344]
+
+  - name: "Moran"
+    coordinates: [262, 428]
+
+  - name: "WEB"
+    coordinates: [131, 383]
+
+  - name: "Sagepoint"
+    coordinates: [382, 266]
+
+  - name: "Law73"
+    coordinates: [24, 244]
+
+  - name: "Humanities"
+    coordinates: [171, 314]
+
+  - name: "Madsen"
+    coordinates: [285, 158]
+
+  - name: "Garage"
+    coordinates: [190, 239]
