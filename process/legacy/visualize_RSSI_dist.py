@@ -3,7 +3,7 @@ import numpy as np
 from geopy import distance
 
 
-tx1_ebc = np.load("files_generated_by_process_data_scripts/TX1EBC_pow_test.npy")
+tx1_ebc = np.load("./files_generated_by_process_data_scripts/TX1EBC_pow_test.npy")
 tx2_ustar = np.load("files_generated_by_process_data_scripts/TX1Ustar_pow_test.npy")
 tx3 = np.load("files_generated_by_process_data_scripts/TX2_pow_test.npy")
 tx4 = np.load("files_generated_by_process_data_scripts/TX3_pow_test.npy")

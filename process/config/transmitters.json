@@ -1,0 +1,38 @@
+{
+  "ebc": {
+    "name": "EBC",
+    "latitude": 40.76702,
+    "longitude": -111.83807,
+    "description": "EBC transmitter location"
+  },
+  "ustar": {
+    "name": "USTAR",
+    "latitude": 40.76899,
+    "longitude": -111.84167,
+    "description": "USTAR transmitter location"
+  },
+  "guesthouse": {
+    "name": "Guesthouse",
+    "latitude": 40.76749,
+    "longitude": -111.83607,
+    "description": "Guesthouse transmitter location"
+  },
+  "mario": {
+    "name": "Mario",
+    "latitude": 40.77283,
+    "longitude": -111.84088,
+    "description": "Mario transmitter location"
+  },
+  "moran": {
+    "name": "Moran",
+    "latitude": 40.76989,
+    "longitude": -111.83869,
+    "description": "Moran transmitter location"
+  },
+  "wasatch": {
+    "name": "Wasatch",
+    "latitude": 40.77108,
+    "longitude": -111.84316,
+    "description": "Wasatch transmitter location"
+  }
+}
