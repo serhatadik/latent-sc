@@ -8,35 +8,35 @@ The legacy Jupyter notebook codebase has been successfully reorganized into a cl
 
 ### 1. Core Module Implementation (16 Python modules)
 
-**src/utils/** (3 modules, ~340 lines)
+**src/utils/** (3 modules)
 - `conversions.py`: dB ↔ linear power conversions
 - `coordinates.py`: Serialization, Euclidean distance calculations
 - `map_utils.py`: SLC map loading and processing
 
-**src/data_processing/** (3 modules, ~540 lines)
+**src/data_processing/** (3 modules)
 - `loader.py`: CSV/gzip data loading with filtering
 - `occupancy.py`: Duty cycle, avg power, signal variation metrics
 - `temporal.py`: Time-of-day and seasonal analysis
 
-**src/localization/** (3 modules, ~590 lines) - **CORE ALGORITHM**
+**src/localization/** (3 modules) - **CORE ALGORITHM**
 - `path_loss.py`: Log-distance path loss model (Equation 1)
 - `transmitter.py`: Transmit power estimation (Equation 3)
 - `likelihood.py`: Covariance matrix & PMF computation (Equations 4-6)
 
-**src/interpolation/** (2 modules, ~360 lines)
+**src/interpolation/** (2 modules)
 - `idw.py`: Inverse Distance Weighting (Equations 7-8)
 - `confidence.py`: Confidence level mapping (Equation 9)
 
-**src/analysis/** (2 modules, ~340 lines)
+**src/analysis/** (2 modules)
 - `correlation.py`: Metric correlation analysis (Table III)
 - `regression.py`: Variance prediction model (Figure 6)
 
-**src/visualization/** (3 modules, ~900 lines)
+**src/visualization/** (3 modules)
 - `spatial_plots.py`: Transmit power, PMF, signal estimates (Figures 3, 4, 7)
 - `temporal_plots.py`: Time-of-day and seasonal plots (Figure 5)
 - `analysis_plots.py`: Histograms, regression, correlations (Figures 2, 6)
 
-### 2. Pipeline Scripts (5 scripts, ~800 lines)
+### 2. Pipeline Scripts (5 scripts)
 
 - `01_process_occupancy.py`: Extract occupancy metrics from raw data
 - `02_estimate_signals.py`: Run localization algorithm
@@ -190,39 +190,6 @@ tx_power_map = estimate_transmit_power_map(...)
 # Generate figure
 plot_transmit_power_map(tx_power_map, ...)
 ```
-
-## Key Improvements Over Legacy Code
-
-### ✓ Modular & Reusable
-- Functions can be imported and reused
-- Clear separation of concerns
-- No code duplication
-
-### ✓ Configurable
-- All parameters in YAML files
-- No hard-coded values
-- Easy to test different configurations
-
-### ✓ Documented
-- Docstrings for all functions
-- Type hints for parameters
-- Inline comments for complex logic
-
-### ✓ Testable
-- Unit tests for core functions
-- Equivalency tests vs legacy code
-- Integration tests for workflows
-
-### ✓ Maintainable
-- Consistent coding style
-- Clear naming conventions
-- Logical file organization
-
-### ✓ Production-Ready
-- Error handling
-- Progress indicators (tqdm)
-- Parallel processing (joblib)
-- Logging and validation
 
 ## Performance Features
 
