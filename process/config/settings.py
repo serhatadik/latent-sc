@@ -5,10 +5,12 @@ All hard-coded values from the original scripts are consolidated here.
 from pathlib import Path
 
 # Base directories
-BASE_DIR = Path(__file__).parent.parent.parent
-RAW_DATA_DIR = BASE_DIR / "raw_data"
-PROCESSED_DATA_DIR = BASE_DIR / "processed_data"
-OUTPUT_DIR = Path(__file__).parent.parent / "output"
+# Note: Raw data is in parent directory of project root
+PROJECT_ROOT = Path(__file__).parent.parent.parent  # latent-sc/
+BASE_DIR = PROJECT_ROOT.parent  # C:/Users/serha/ or parent of project
+RAW_DATA_DIR = BASE_DIR / "raw_data"  # C:/Users/serha/raw_data/
+PROCESSED_DATA_DIR = PROJECT_ROOT / "processed_data"  # latent-sc/processed_data/
+OUTPUT_DIR = Path(__file__).parent.parent / "output"  # latent-sc/process/output/
 
 # Legacy output directory name (for backward compatibility)
 LEGACY_OUTPUT_DIR = Path(__file__).parent.parent / "files_generated_by_process_data_scripts"

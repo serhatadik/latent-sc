@@ -2,5 +2,6 @@
 raw_data/
 process/files_generated_by_process_data_scripts/
 
+__pycache__/
 # Generated files
 nul

@@ -45,6 +45,31 @@ def load_iq_samples_from_directories(
     return data
 
 
+def find_sample_directories_recursive(root_dir: Path, pattern: str = "samples_20*") -> List[Path]:
+    """
+    Recursively find all directories matching the pattern under root_dir.
+
+    This searches through all subdirectories to find sample folders,
+    since the walking/ and driving/ directories have subcategorization
+    (e.g., by date and person).
+
+    Args:
+        root_dir: Root directory to search
+        pattern: Glob pattern for sample directories
+
+    Returns:
+        List of paths to sample directories
+    """
+    sample_dirs = []
+
+    # Use rglob to recursively search for matching directories
+    for path in root_dir.rglob(pattern):
+        if path.is_dir():
+            sample_dirs.append(path)
+
+    return sample_dirs
+
+
 def load_mobile_iq_samples(
     walking_dir: Path,
     driving_dir: Path,
@@ -53,6 +78,10 @@ def load_mobile_iq_samples(
 ) -> Dict[np.datetime64, np.ndarray]:
     """
     Load IQ samples for mobile measurements (walking + driving).
+
+    This function recursively searches for sample directories under
+    walking_dir and driving_dir, since there may be subcategorization
+    by date and person.
 
     Args:
         walking_dir: Directory containing walking measurement folders
@@ -63,20 +92,17 @@ def load_mobile_iq_samples(
     Returns:
         Dictionary mapping timestamps to IQ sample arrays
     """
-    # Find all sample directories
-    walking_folders = [
-        walking_dir / name
-        for name in os.listdir(walking_dir)
-        if name.startswith('samples_20')
-    ]
+    # Recursively find all sample directories
+    print(f"Searching for sample directories under {walking_dir}...")
+    walking_folders = find_sample_directories_recursive(walking_dir, sample_pattern)
+    print(f"Found {len(walking_folders)} walking sample directories")
 
-    driving_folders = [
-        driving_dir / name
-        for name in os.listdir(driving_dir)
-        if name.startswith('samples_20')
-    ]
+    print(f"Searching for sample directories under {driving_dir}...")
+    driving_folders = find_sample_directories_recursive(driving_dir, sample_pattern)
+    print(f"Found {len(driving_folders)} driving sample directories")
 
     all_folders = walking_folders + driving_folders
+    print(f"Total sample directories: {len(all_folders)}")
 
     # Load IQ samples from all directories
     data = load_iq_samples_from_directories(all_folders, samples_to_skip)
