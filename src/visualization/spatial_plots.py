@@ -89,8 +89,8 @@ def plot_transmit_power_map(transmit_power_map, data_points, observed_powers,
 
     plt.xlabel('UTM$_E$ [m]', fontsize=18, labelpad=10)
     plt.ylabel('UTM$_N$ [m]', fontsize=18, labelpad=10)
-    plt.title('Estimated Transmit Power @ ' + band_name.split('_')[0] + '-' +
-              band_name.split('_')[1] + ' MHz', fontsize=20)
+    plt.title('Estimated Transmit Power @ ' + band_name.split('-')[0] + '-' +
+              band_name.split('-')[1] + ' MHz', fontsize=20)
 
     if save_path:
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
@@ -168,8 +168,8 @@ def plot_pmf_map(pmf, data_points, observed_powers, UTM_lat, UTM_long,
 
     plt.xlabel('UTM$_E$ [m]', fontsize=18, labelpad=10)
     plt.ylabel('UTM$_N$ [m]', fontsize=18, labelpad=10)
-    plt.title('2D PMF of Transmitter Location @ ' + band_name.split('_')[0] + '-' +
-              band_name.split('_')[1] + ' MHz', fontsize=20)
+    plt.title('2D PMF of Transmitter Location @ ' + band_name.split('-')[0] + '-' +
+              band_name.split('-')[1] + ' MHz', fontsize=20)
 
     if save_path:
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
@@ -263,8 +263,8 @@ def plot_signal_estimates_map(signal_estimates, data_points, observed_powers,
 
     plt.xlabel('UTM$_E$ [m]', fontsize=18, labelpad=10)
     plt.ylabel('UTM$_N$ [m]', fontsize=18, labelpad=10)
-    plt.title('2D Predictions of Signal Strength @ ' + band_name.split('_')[0] + '-' +
-              band_name.split('_')[1] + ' MHz', fontsize=20)
+    plt.title('2D Predictions of Signal Strength @ ' + band_name.split('-')[0] + '-' +
+              band_name.split('-')[1] + ' MHz', fontsize=20)
 
     if save_path:
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
@@ -413,8 +413,8 @@ def plot_power_duty_cycle_combined(power_map, duty_cycle_map, data_points,
 
     plt.xlabel('UTM$_E$ [m]', fontsize=18, labelpad=10)
     plt.ylabel('UTM$_N$ [m]', fontsize=18, labelpad=10)
-    plt.title('Spatial Spectrum Occupancy @ ' + band_name.split('_')[0] + '-' +
-              band_name.split('_')[1] + ' MHz', fontsize=20)
+    plt.title('Spatial Spectrum Occupancy @ ' + band_name.split('-')[0] + '-' +
+              band_name.split('-')[1] + ' MHz', fontsize=20)
     plt.legend()
 
     if save_path:
@@ -468,8 +468,8 @@ def plot_variation_confidence_combined(variation_map, confidence_map, data_point
 
     ax1.set_xlabel('UTM$_E$ [m]', fontsize=18)
     ax1.set_ylabel('UTM$_N$ [m]', fontsize=18)
-    ax1.set_title('Signal Variation @ ' + band_name.split('_')[0] + '-' +
-                  band_name.split('_')[1] + ' MHz', fontsize=20)
+    ax1.set_title('Signal Variation @ ' + band_name.split('-')[0] + '-' +
+                  band_name.split('-')[1] + ' MHz', fontsize=20)
     ax1.legend()
 
     # Plot 2: Confidence Level
@@ -485,8 +485,8 @@ def plot_variation_confidence_combined(variation_map, confidence_map, data_point
 
     ax2.set_xlabel('UTM$_E$ [m]', fontsize=18)
     ax2.set_ylabel('UTM$_N$ [m]', fontsize=18)
-    ax2.set_title('Confidence Level @ ' + band_name.split('_')[0] + '-' +
-                  band_name.split('_')[1] + ' MHz', fontsize=20)
+    ax2.set_title('Confidence Level @ ' + band_name.split('-')[0] + '-' +
+                  band_name.split('-')[1] + ' MHz', fontsize=20)
     ax2.legend()
 
     plt.tight_layout()
