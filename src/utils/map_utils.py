@@ -85,8 +85,10 @@ def load_slc_map(map_folder_dir="./", downsample_factor=10):
     en = SLC[column_map["axis"]]
     cellsize = float(SLC[column_map["cellsize"]])
 
-    UTM_long = np.linspace(en[0, 2], en[0, 3] - cellsize, N2)
-    UTM_lat = np.linspace(en[0, 0], en[0, 1] - cellsize, N1)
+    # axis format: [easting_min, easting_max, northing_min, northing_max]
+    # UTM_long should be Easting (x-axis), UTM_lat should be Northing (y-axis)
+    UTM_long = np.linspace(en[0, 0], en[0, 1] - cellsize, N2)  # Easting (x)
+    UTM_lat = np.linspace(en[0, 2], en[0, 3] - cellsize, N1)   # Northing (y)
 
     return {
         'map': combined_map,

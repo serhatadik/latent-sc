@@ -9,6 +9,7 @@ seaborn>=0.11.0
 scikit-learn>=0.24.0
 
 # Geospatial
+pyproj>=3.0.0  # For lat/lon to UTM coordinate conversion
 # pykrige>=1.6.0  # Optional: Only needed if using Universal Kriging
 
 # Parallel processing

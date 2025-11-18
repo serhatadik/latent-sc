@@ -1,34 +1,60 @@
 # Monitoring Station Locations
-# Coordinates in pixel space after 10x downsampling
-# Format: [col, row] which corresponds to [x, y] or [UTM_E, UTM_N]
+# Coordinates in latitude/longitude (WGS84)
+# Format: [longitude, latitude] (negative longitude for West)
+# These will be automatically converted to pixel coordinates using the SLC map
 
+# UTM Zone for Salt Lake City area
+utm_zone: 12
+northern_hemisphere: true
+
+# Monitoring stations with lat/lon coordinates
 data_points:
   - name: "Bookstore"
-    coordinates: [96, 299]
+    longitude: -111.84759
+    latitude: 40.76414
+    # Old pixel coordinates (for verification): [96, 299]
 
   - name: "EBC"
-    coordinates: [256, 376]
+    longitude: -111.83814
+    latitude: 40.76770
+    # Old pixel coordinates (for verification): [256, 376]
 
   - name: "Guesthouse"
-    coordinates: [287, 344]
+    longitude: -111.83632
+    latitude: 40.76627
+    # Old pixel coordinates (for verification): [287, 344]
 
   - name: "Moran"
-    coordinates: [262, 428]
+    longitude: -111.83786
+    latitude: 40.77004
+    # Old pixel coordinates (for verification): [262, 428]
 
   - name: "WEB"
-    coordinates: [131, 383]
+    longitude: -111.84559
+    latitude: 40.76793
+    # Old pixel coordinates (for verification): [131, 383]
 
   - name: "Sagepoint"
-    coordinates: [382, 266]
+    longitude: -111.83062
+    latitude: 40.76280
+    # Old pixel coordinates (for verification): [382, 266]
 
   - name: "Law73"
-    coordinates: [24, 244]
+    longitude: -111.85185
+    latitude: 40.76163
+    # Old pixel coordinates (for verification): [24, 244]
 
   - name: "Humanities"
-    coordinates: [171, 314]
+    longitude: -111.84319
+    latitude: 40.76486
+    # Old pixel coordinates (for verification): [171, 314]
 
   - name: "Madsen"
-    coordinates: [285, 158]
+    longitude: -111.83634
+    latitude: 40.75788
+    # Old pixel coordinates (for verification): [285, 158]
 
   - name: "Garage"
-    coordinates: [190, 239]
+    longitude: -111.84201
+    latitude: 40.76148
+    # Old pixel coordinates (for verification): [190, 239]

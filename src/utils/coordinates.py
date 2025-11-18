@@ -1,6 +1,7 @@
 """Coordinate system utilities and distance calculations."""
 
 import numpy as np
+from pyproj import Transformer
 
 
 def serialize_index(row, col, num_cols):
@@ -325,6 +326,144 @@ def utm_array_to_pixel(utm_coords, map_data):
 
     for i in range(len(utm_coords)):
         col, row = utm_to_pixel(utm_coords[i, 0], utm_coords[i, 1], map_data)
+        pixel_coords[i] = [col, row]
+
+    return pixel_coords
+
+
+def latlon_to_utm(latitude, longitude, utm_zone=12, northern=True):
+    """
+    Convert latitude/longitude to UTM coordinates.
+
+    Parameters
+    ----------
+    latitude : float or array_like
+        Latitude in decimal degrees
+    longitude : float or array_like
+        Longitude in decimal degrees (negative for West)
+    utm_zone : int, optional
+        UTM zone number (default: 12 for Salt Lake City)
+    northern : bool, optional
+        True if Northern hemisphere (default: True)
+
+    Returns
+    -------
+    tuple of (float or ndarray, float or ndarray)
+        (utm_e, utm_n) UTM coordinates in meters
+
+    Examples
+    --------
+    >>> lat, lon = 40.76414, -111.84759  # Bookstore location
+    >>> utm_e, utm_n = latlon_to_utm(lat, lon, utm_zone=12)
+    >>> isinstance(utm_e, float) and isinstance(utm_n, float)
+    True
+
+    Notes
+    -----
+    Salt Lake City is in UTM Zone 12N.
+    The default settings are configured for this region.
+    """
+    latitude = np.atleast_1d(latitude)
+    longitude = np.atleast_1d(longitude)
+
+    # Create transformer from WGS84 (EPSG:4326) to UTM
+    hemisphere = 'north' if northern else 'south'
+    utm_crs = f"+proj=utm +zone={utm_zone} +{hemisphere} +ellps=WGS84 +datum=WGS84 +units=m +no_defs"
+
+    transformer = Transformer.from_crs("EPSG:4326", utm_crs, always_xy=True)
+
+    # Transform (note: pyproj expects lon, lat order)
+    utm_e, utm_n = transformer.transform(longitude, latitude)
+
+    # Return as scalar if input was scalar
+    if np.asarray(utm_e).size == 1:
+        return float(utm_e), float(utm_n)
+    else:
+        return np.asarray(utm_e), np.asarray(utm_n)
+
+
+def latlon_to_pixel(latitude, longitude, map_data, utm_zone=12, northern=True):
+    """
+    Convert latitude/longitude to pixel coordinates.
+
+    This is a convenience function that combines latlon_to_utm and utm_to_pixel.
+
+    Parameters
+    ----------
+    latitude : float or array_like
+        Latitude in decimal degrees
+    longitude : float or array_like
+        Longitude in decimal degrees (negative for West)
+    map_data : dict
+        Map data dictionary from load_slc_map()
+    utm_zone : int, optional
+        UTM zone number (default: 12 for Salt Lake City)
+    northern : bool, optional
+        True if Northern hemisphere (default: True)
+
+    Returns
+    -------
+    tuple of (int or ndarray, int or ndarray)
+        (col, row) pixel coordinates
+
+    Examples
+    --------
+    >>> lat, lon = 40.76414, -111.84759  # Bookstore location
+    >>> col, row = latlon_to_pixel(lat, lon, map_data, utm_zone=12)
+    >>> isinstance(col, (int, np.integer)) and isinstance(row, (int, np.integer))
+    True
+
+    Notes
+    -----
+    This function is useful for directly converting sensor locations
+    specified in lat/lon to pixel coordinates for the localization algorithm.
+    """
+    # Convert lat/lon to UTM
+    utm_e, utm_n = latlon_to_utm(latitude, longitude, utm_zone, northern)
+
+    # Convert UTM to pixel
+    col, row = utm_to_pixel(utm_e, utm_n, map_data)
+
+    return col, row
+
+
+def latlon_array_to_pixel(latlon_coords, map_data, utm_zone=12, northern=True):
+    """
+    Convert array of lat/lon coordinates to pixel coordinates.
+
+    Parameters
+    ----------
+    latlon_coords : ndarray
+        Nx2 array of [longitude, latitude] coordinates in decimal degrees
+    map_data : dict
+        Map data dictionary from load_slc_map()
+    utm_zone : int, optional
+        UTM zone number (default: 12 for Salt Lake City)
+    northern : bool, optional
+        True if Northern hemisphere (default: True)
+
+    Returns
+    -------
+    ndarray
+        Nx2 array of [col, row] pixel coordinates
+
+    Examples
+    --------
+    >>> latlon_coords = np.array([[-111.84759, 40.76414], [-111.83814, 40.76770]])
+    >>> pixel_coords = latlon_array_to_pixel(latlon_coords, map_data)
+    >>> pixel_coords.shape
+    (2, 2)
+
+    Notes
+    -----
+    Input format is [longitude, latitude] to match the [x, y] convention.
+    """
+    latlon_coords = np.atleast_2d(latlon_coords)
+    pixel_coords = np.zeros((len(latlon_coords), 2), dtype=int)
+
+    for i in range(len(latlon_coords)):
+        lon, lat = latlon_coords[i]
+        col, row = latlon_to_pixel(lat, lon, map_data, utm_zone, northern)
         pixel_coords[i] = [col, row]
 
     return pixel_coords
