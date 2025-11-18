@@ -12,7 +12,7 @@ spatial:
 localization:
   correlation_coeff: 400        # δc: Spatial correlation coefficient [m]
   std_deviation: 4.5            # σ: Standard deviation [dB]
-  path_loss_exponent: 2         # np: Path loss exponent
+  path_loss_exponent: 3.5         # np: Path loss exponent
   reference_distance: 1         # di0: Reference distance [m]
   reference_power: 0            # pi0: Reference power [dB]
 

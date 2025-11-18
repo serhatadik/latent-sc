@@ -18,6 +18,16 @@ from .temporal import (
     filter_by_season,
     compute_temporal_metrics
 )
+from .iq_processor import (
+    load_iq_samples_from_directory,
+    load_iq_samples_from_directories,
+    load_gps_from_csv,
+    process_iq_sample,
+    match_power_with_gps,
+    aggregate_measurements_by_location,
+    TRANSMITTER_TO_CHANNEL,
+    RF_CHANNELS
+)
 
 __all__ = [
     'read_gzipped_csv',
@@ -31,5 +41,13 @@ __all__ = [
     'compute_occupancy_metrics',
     'filter_by_time_of_day',
     'filter_by_season',
-    'compute_temporal_metrics'
+    'compute_temporal_metrics',
+    'load_iq_samples_from_directory',
+    'load_iq_samples_from_directories',
+    'load_gps_from_csv',
+    'process_iq_sample',
+    'match_power_with_gps',
+    'aggregate_measurements_by_location',
+    'TRANSMITTER_TO_CHANNEL',
+    'RF_CHANNELS'
 ]
