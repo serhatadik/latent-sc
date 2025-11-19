@@ -36,8 +36,7 @@ from src.data_processing.iq_processor import (
     match_power_with_gps,
     aggregate_measurements_by_location,
     TRANSMITTER_TO_CHANNEL,
-    RF_CHANNELS,
-    process_iq_sample_multi_transmitter
+    RF_CHANNELS
 )
 
 
@@ -545,32 +544,36 @@ Available transmitters: ebc, ustar, guesthouse, mario, moran, wasatch
 
     print(f"Loaded {len(gps_coords)} GPS coordinates")
 
-    # Step 4: Process IQ samples and match with GPS
+    # Step 4: Match timestamps with GPS (NO FFT yet - optimization!)
     tx_str = ', '.join(transmitter_names) if len(transmitter_names) > 1 else transmitter_names[0]
-    print(f"\nStep 4: Processing IQ samples for transmitter(s): {tx_str}...")
-    measurements = match_power_with_gps(
+    print(f"\nStep 4: Matching IQ timestamps with GPS for transmitter(s): {tx_str}...")
+    print("(Skipping power computation for now to save time)")
+    metadata = match_power_with_gps(
         iq_data,
         gps_coords,
-        transmitter_names
+        transmitter_names,
+        compute_power=False  # Just get metadata, skip expensive FFT
     )
 
-    if not measurements:
-        print("Error: No measurements matched with GPS coordinates")
+    if not metadata:
+        print("Error: No timestamps matched with GPS coordinates")
         return 1
 
-    # Step 5: Aggregate by location
-    print(f"\nStep 5: Aggregating measurements by location...")
+    # Step 5: Aggregate by location (metadata only, with timestamps)
+    print(f"\nStep 5: Aggregating by location...")
     aggregated = aggregate_measurements_by_location(
-        measurements,
+        metadata,
         args.dedup_threshold,
-        args.min_samples
+        args.min_samples,
+        include_timestamps=True  # We need timestamps for phase 3
     )
 
     if not aggregated:
         print("Error: No locations met the minimum sample requirement")
         return 1
 
-    # Select N locations
+    # Step 6: Select N locations (before computing expensive FFT!)
+    print(f"\nStep 6: Selecting {args.num_locations} locations...")
     if args.random_seed is not None:
         # Random selection with seed for reproducibility
         import random
@@ -583,15 +586,57 @@ Available transmitters: ebc, ustar, guesthouse, mario, moran, wasatch
         # Sort by sample count for organized display (but keep original names)
         selected_locations.sort(key=lambda x: x['num_samples'], reverse=True)
 
-        print(f"\nRandomly selected {len(selected_locations)} locations using seed {args.random_seed}")
+        print(f"Randomly selected {len(selected_locations)} locations using seed {args.random_seed}")
         print(f"  (sorted by sample count for display)")
     else:
         # Default: select top N locations by sample count
         selected_locations = aggregated[:args.num_locations]
-        print(f"\nSelected top {len(selected_locations)} locations by sample count")
+        print(f"Selected top {len(selected_locations)} locations by sample count")
 
-    # Step 6: Generate outputs
-    print(f"\nStep 6: Generating outputs...")
+    # Step 7: Compute power ONLY for selected locations (optimization!)
+    print(f"\nStep 7: Computing power for selected locations...")
+    # Collect all timestamps from selected locations
+    selected_timestamps = set()
+    for loc in selected_locations:
+        selected_timestamps.update(loc['timestamps'])
+
+    print(f"Computing FFT for {len(selected_timestamps)} samples (from {len(selected_locations)} locations)")
+
+    # Filter iq_data to only selected timestamps
+    filtered_iq_data = {ts: iq_data[ts] for ts in selected_timestamps if ts in iq_data}
+
+    # Reprocess with power computation
+    measurements_with_power = match_power_with_gps(
+        filtered_iq_data,
+        gps_coords,
+        transmitter_names,
+        compute_power=True  # Now compute power with FFT
+    )
+
+    # Re-aggregate to get power statistics
+    final_locations = aggregate_measurements_by_location(
+        measurements_with_power,
+        args.dedup_threshold,
+        args.min_samples,
+        include_timestamps=False  # Don't need timestamps anymore
+    )
+
+    # The locations should match our selected ones - preserve the names
+    # Map by coordinates to preserve location names
+    coord_to_name = {}
+    for loc in selected_locations:
+        key = (round(loc['latitude'], 6), round(loc['longitude'], 6))
+        coord_to_name[key] = loc['name']
+
+    for loc in final_locations:
+        key = (round(loc['latitude'], 6), round(loc['longitude'], 6))
+        if key in coord_to_name:
+            loc['name'] = coord_to_name[key]
+
+    selected_locations = final_locations
+
+    # Step 8: Generate outputs
+    print(f"\nStep 8: Generating outputs...")
 
     # Print summary
     print_summary(selected_locations, transmitter_names)

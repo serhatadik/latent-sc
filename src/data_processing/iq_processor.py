@@ -444,7 +444,8 @@ def match_power_with_gps(
     sample_rate: float = DEFAULT_SAMPLE_RATE,
     center_freq: float = DEFAULT_CENTER_FREQ,
     progress_interval: int = 100,
-    time_tolerance_seconds: int = 10
+    time_tolerance_seconds: int = 10,
+    compute_power: bool = True
 ) -> List[Dict]:
     """
     Process IQ samples, extract power, and match with GPS coordinates.
@@ -478,15 +479,18 @@ def match_power_with_gps(
         Print progress every N samples
     time_tolerance_seconds : int, optional
         Maximum time difference for matching GPS coordinates (default: 10s)
+    compute_power : bool, optional
+        If True, compute FFT and extract power (default). If False, only return metadata
+        for later power computation (optimization for location selection).
 
     Returns
     -------
     List[Dict]
         List of dictionaries containing:
         - 'timestamp': np.datetime64
-        - 'power': float (dB)
         - 'longitude': float
         - 'latitude': float
+        - 'power': float (dB) - only if compute_power=True
 
     Raises
     ------
@@ -558,33 +562,41 @@ def match_power_with_gps(
             min_diff = time_diffs[nearest_idx]
 
             if min_diff <= time_tolerance_seconds:
-                # Process IQ sample to extract power
-                if is_multi_transmitter:
-                    # Multi-transmitter mode: sum linear powers
-                    power = process_iq_sample_multi_transmitter(
-                        iq_data[time],
-                        transmitter_names,
-                        sample_rate,
-                        center_freq
-                    )
-                else:
-                    # Single transmitter mode: backward compatible
-                    power = process_iq_sample(
-                        iq_data[time],
-                        transmitter_names[0],
-                        sample_rate,
-                        center_freq
-                    )
-
                 gps_time = gps_times[nearest_idx]
                 lon, lat = gps_coords[gps_time]
 
-                measurements.append({
-                    'timestamp': time,
-                    'power': power,
-                    'longitude': lon,
-                    'latitude': lat
-                })
+                if compute_power:
+                    # Process IQ sample to extract power (expensive FFT)
+                    if is_multi_transmitter:
+                        # Multi-transmitter mode: sum linear powers
+                        power = process_iq_sample_multi_transmitter(
+                            iq_data[time],
+                            transmitter_names,
+                            sample_rate,
+                            center_freq
+                        )
+                    else:
+                        # Single transmitter mode: backward compatible
+                        power = process_iq_sample(
+                            iq_data[time],
+                            transmitter_names[0],
+                            sample_rate,
+                            center_freq
+                        )
+
+                    measurements.append({
+                        'timestamp': time,
+                        'power': power,
+                        'longitude': lon,
+                        'latitude': lat
+                    })
+                else:
+                    # Just save metadata for later power computation
+                    measurements.append({
+                        'timestamp': time,
+                        'longitude': lon,
+                        'latitude': lat
+                    })
         except Exception as e:
             if i < 10:  # Only print first few errors to avoid spam
                 print(f"Warning: Failed to process sample at {time}: {e}")
@@ -601,7 +613,8 @@ def match_power_with_gps(
 def aggregate_measurements_by_location(
     measurements: List[Dict],
     dedup_threshold_meters: float = 20.0,
-    min_samples_per_location: int = 10
+    min_samples_per_location: int = 10,
+    include_timestamps: bool = False
 ) -> List[Dict]:
     """
     Aggregate measurements by receiver location.
@@ -612,11 +625,15 @@ def aggregate_measurements_by_location(
     Parameters
     ----------
     measurements : List[Dict]
-        List of measurement dictionaries from match_power_with_gps()
+        List of measurement dictionaries from match_power_with_gps().
+        Can contain either full measurements with 'power' field or
+        metadata-only measurements (without 'power').
     dedup_threshold_meters : float, optional
         Distance threshold in meters for grouping locations (default: 20m)
     min_samples_per_location : int, optional
         Minimum number of measurements required per location (default: 10)
+    include_timestamps : bool, optional
+        If True, include list of timestamps for each location (default: False)
 
     Returns
     -------
@@ -625,21 +642,26 @@ def aggregate_measurements_by_location(
         - 'name': str (auto-generated like "Location_1")
         - 'longitude': float (averaged)
         - 'latitude': float (averaged)
-        - 'avg_power': float (averaged dB)
         - 'num_samples': int
-        - 'std_power': float (standard deviation in dB)
+        - 'avg_power': float (averaged dB) - only if input has power data
+        - 'std_power': float (standard deviation in dB) - only if input has power data
+        - 'timestamps': List[np.datetime64] - only if include_timestamps=True
     """
     from geopy import distance
 
     if not measurements:
         return []
 
+    # Check if measurements have power data or just metadata
+    has_power = 'power' in measurements[0]
+
     print(f"\nAggregating {len(measurements)} measurements by location...")
     print(f"Deduplication threshold: {dedup_threshold_meters} meters")
 
     # Convert to numpy arrays for easier processing
     coords = np.array([[m['latitude'], m['longitude']] for m in measurements])
-    powers = np.array([m['power'] for m in measurements])
+    if has_power:
+        powers = np.array([m['power'] for m in measurements])
 
     # Group measurements by location
     location_groups = []
@@ -675,15 +697,22 @@ def aggregate_measurements_by_location(
         # Compute averages
         group_lats = coords[group_idx, 0]
         group_lons = coords[group_idx, 1]
-        group_powers = powers[group_idx]
 
-        aggregated_locations.append({
+        location_dict = {
             'latitude': float(np.mean(group_lats)),
             'longitude': float(np.mean(group_lons)),
-            'avg_power': float(np.mean(group_powers)),
-            'std_power': float(np.std(group_powers)),
             'num_samples': len(group_idx)
-        })
+        }
+
+        if has_power:
+            group_powers = powers[group_idx]
+            location_dict['avg_power'] = float(np.mean(group_powers))
+            location_dict['std_power'] = float(np.std(group_powers))
+
+        if include_timestamps:
+            location_dict['timestamps'] = [measurements[i]['timestamp'] for i in group_idx]
+
+        aggregated_locations.append(location_dict)
 
     # Sort by number of samples (descending)
     aggregated_locations.sort(key=lambda x: x['num_samples'], reverse=True)
