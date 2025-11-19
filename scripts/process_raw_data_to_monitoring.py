@@ -225,7 +225,7 @@ def save_processed_data(
     if len(transmitter_names) == 1:
         file_prefix = transmitter_names[0]
     else:
-        file_prefix = "_".join(sorted(transmitter_names))
+        file_prefix = "_".join(transmitter_names)
 
     # Save as numpy arrays
     names = [loc['name'] for loc in locations]
@@ -449,7 +449,11 @@ Available transmitters: ebc, ustar, guesthouse, mario, moran, wasatch
     if len(transmitter_names) == 1:
         transmitter_id = transmitter_names[0]
     else:
-        transmitter_id = "_".join(sorted(transmitter_names))
+        transmitter_id = "_".join(transmitter_names)
+
+    # Append random seed to identifier if provided
+    if args.random_seed is not None:
+        transmitter_id = f"{transmitter_id}_seed{args.random_seed}"
 
     # Set default output paths if not specified
     if args.output_yaml is None:
