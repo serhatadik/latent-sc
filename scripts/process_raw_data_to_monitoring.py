@@ -327,6 +327,13 @@ Examples:
       --transmitter moran \\
       --num-locations 5
 
+  # Randomly select 10 locations (reproducible with seed)
+  python scripts/process_raw_data_to_monitoring.py \\
+      --input-dir "C:/Users/serha/raw_data/stat_rot/stat/" \\
+      --transmitter mario \\
+      --num-locations 10 \\
+      --random-seed 42
+
 Available transmitters: ebc, ustar, guesthouse, mario, moran, wasatch
   Note: ebc and ustar share TX1 frequency band but are date-separated:
     - ebc: Data from June 27, 2023 and earlier
@@ -406,6 +413,14 @@ Available transmitters: ebc, ustar, guesthouse, mario, moran, wasatch
         type=int,
         default=-6,
         help="GPS time offset in hours for timezone conversion (default: -6 for UTC-6)"
+    )
+    parser.add_argument(
+        "--random-seed",
+        type=int,
+        default=None,
+        help="Random seed for location selection. If provided, randomly selects locations instead of "
+             "choosing top N by sample count. Use same seed for reproducible selection (default: None, "
+             "which selects top N locations by sample count)"
     )
 
     args = parser.parse_args()
@@ -551,8 +566,25 @@ Available transmitters: ebc, ustar, guesthouse, mario, moran, wasatch
         print("Error: No locations met the minimum sample requirement")
         return 1
 
-    # Select top N locations
-    selected_locations = aggregated[:args.num_locations]
+    # Select N locations
+    if args.random_seed is not None:
+        # Random selection with seed for reproducibility
+        import random
+        random.seed(args.random_seed)
+
+        # Randomly sample from all locations that meet minimum sample requirement
+        num_to_select = min(args.num_locations, len(aggregated))
+        selected_locations = random.sample(aggregated, num_to_select)
+
+        # Sort by sample count for organized display (but keep original names)
+        selected_locations.sort(key=lambda x: x['num_samples'], reverse=True)
+
+        print(f"\nRandomly selected {len(selected_locations)} locations using seed {args.random_seed}")
+        print(f"  (sorted by sample count for display)")
+    else:
+        # Default: select top N locations by sample count
+        selected_locations = aggregated[:args.num_locations]
+        print(f"\nSelected top {len(selected_locations)} locations by sample count")
 
     # Step 6: Generate outputs
     print(f"\nStep 6: Generating outputs...")
