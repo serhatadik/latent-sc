@@ -30,13 +30,20 @@ RF_CHANNELS = {
 }
 
 # Transmitter to RF Channel Mapping
+# Note: EBC and USTAR share TX1 frequency band but are separated by date:
+# - EBC: Used until June 27, 2023 (inclusive)
+# - USTAR: Used from June 28, 2023 onwards
 TRANSMITTER_TO_CHANNEL = {
-    "ustar": "TX1",
+    "ebc": "TX1",        # Active: <= 2023-06-27
+    "ustar": "TX1",      # Active: >= 2023-06-28
     "guesthouse": "TX2",
     "mario": "TX3",
     "moran": "TX4",
     "wasatch": "TX5",
 }
+
+# Date threshold for EBC/USTAR split (midnight on June 28, 2023)
+TX1_SPLIT_DATE = np.datetime64('2023-06-28T00:00:00')
 
 # Default RF parameters
 DEFAULT_CENTER_FREQ = 3.534e9  # Hz
@@ -330,6 +337,10 @@ def match_power_with_gps(
     Uses nearest-neighbor matching within a time tolerance window since
     GPS and IQ timestamps may not align exactly.
 
+    For EBC/USTAR transmitters (both using TX1), applies date filtering:
+    - EBC: Only processes samples from June 27, 2023 and earlier
+    - USTAR: Only processes samples from June 28, 2023 and later
+
     Parameters
     ----------
     iq_data : Dict[np.datetime64, np.ndarray]
@@ -337,7 +348,7 @@ def match_power_with_gps(
     gps_coords : Dict[np.datetime64, np.ndarray]
         Dictionary mapping timestamps to [lon, lat] coordinates
     transmitter_name : str
-        Name of transmitter to extract power for
+        Name of transmitter to extract power for (ebc, ustar, guesthouse, mario, moran, wasatch)
     sample_rate : float, optional
         Sampling rate in Hz
     center_freq : float, optional
@@ -360,16 +371,42 @@ def match_power_with_gps(
     gps_times = np.array(sorted(list(gps_coords.keys())))
     measurements = []
 
+    # Determine date filter for EBC/USTAR
+    apply_date_filter = transmitter_name in ['ebc', 'ustar']
+    if apply_date_filter:
+        if transmitter_name == 'ebc':
+            date_filter_desc = f"samples before {TX1_SPLIT_DATE} (EBC period)"
+        else:  # ustar
+            date_filter_desc = f"samples from {TX1_SPLIT_DATE} onwards (USTAR period)"
+    else:
+        date_filter_desc = "all samples"
+
     print(f"Processing {len(times)} IQ samples for transmitter '{transmitter_name}'...")
     print(f"GPS time range: {gps_times[0]} to {gps_times[-1]}")
     print(f"IQ time range: {times[0]} to {times[-1]}")
     print(f"Time tolerance: ±{time_tolerance_seconds} seconds")
+    print(f"Date filter: {date_filter_desc}")
+
+    skipped_by_date = 0
 
     for i, time in enumerate(times):
         if i % progress_interval == 0:
             print(f"Progress: {i}/{len(times)} ({i/len(times)*100:.1f}%)")
 
         try:
+            # Apply date filtering for EBC/USTAR
+            if apply_date_filter:
+                if transmitter_name == 'ebc':
+                    # EBC: Only use samples from June 27, 2023 and earlier
+                    if time >= TX1_SPLIT_DATE:
+                        skipped_by_date += 1
+                        continue
+                else:  # ustar
+                    # USTAR: Only use samples from June 28, 2023 and later
+                    if time < TX1_SPLIT_DATE:
+                        skipped_by_date += 1
+                        continue
+
             # Find nearest GPS timestamp within tolerance
             time_diffs = np.abs((gps_times - time).astype('timedelta64[s]').astype(int))
             nearest_idx = np.argmin(time_diffs)
@@ -397,6 +434,9 @@ def match_power_with_gps(
             if i < 10:  # Only print first few errors to avoid spam
                 print(f"Warning: Failed to process sample at {time}: {e}")
             continue
+
+    if apply_date_filter and skipped_by_date > 0:
+        print(f"Skipped {skipped_by_date} samples outside {transmitter_name.upper()} date range")
 
     print(f"Matched {len(measurements)} measurements with GPS coordinates")
     return measurements

@@ -42,25 +42,29 @@ from src.data_processing.iq_processor import (
 
 def find_iq_sample_directories(input_dir: Path, pattern: str = "samples_*") -> List[Path]:
     """
-    Find all IQ sample directories under the input directory.
+    Recursively find all IQ sample directories under the input directory.
+
+    This function searches through all subdirectories to find sample folders,
+    allowing for nested directory structures (e.g., walking/serhat_walking_27jun/samples_*/).
 
     Parameters
     ----------
     input_dir : Path
-        Root directory to search
+        Root directory to search recursively
     pattern : str, optional
         Pattern to match sample directories (default: "samples_*")
 
     Returns
     -------
     List[Path]
-        List of paths to sample directories
+        List of paths to sample directories, sorted alphabetically
     """
     sample_dirs = []
 
     if input_dir.is_dir():
-        for item in input_dir.iterdir():
-            if item.is_dir() and item.name.startswith(pattern.replace('*', '')):
+        # Use rglob for recursive search through all subdirectories
+        for item in input_dir.rglob(pattern):
+            if item.is_dir():
                 sample_dirs.append(item)
 
     return sorted(sample_dirs)
@@ -290,7 +294,10 @@ Examples:
       --transmitter moran \\
       --num-locations 5
 
-Available transmitters: ustar, guesthouse, mario, moran, wasatch
+Available transmitters: ebc, ustar, guesthouse, mario, moran, wasatch
+  Note: ebc and ustar share TX1 frequency band but are date-separated:
+    - ebc: Data from June 27, 2023 and earlier
+    - ustar: Data from June 28, 2023 and later
         """
     )
 
@@ -306,7 +313,7 @@ Available transmitters: ustar, guesthouse, mario, moran, wasatch
         type=str,
         required=True,
         choices=list(TRANSMITTER_TO_CHANNEL.keys()),
-        help="Transmitter name to extract power for"
+        help="Transmitter name to extract power for (ebc: <=June 27, ustar: >=June 28)"
     )
     parser.add_argument(
         "--num-locations",
