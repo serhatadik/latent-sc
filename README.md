@@ -1,156 +1,77 @@
-# Modularized Codebase: Description
+# Latent Spatial Coupling for Signal Power Estimation
 
-## Summary
+This repository contains code for estimating signal power across a geographic region using measurements from monitoring stations. It implements likelihood-based localization and spatial interpolation techniques, plus a general-purpose pipeline for processing raw IQ samples from Software Defined Radios (SDRs).
 
-The legacy Jupyter notebook codebase has been successfully reorganized into a clean, modular Python package structure. All functionality from the paper "Georeferenced Spectrum Occupancy Analysis Using Spatially Very Sparse Monitoring Data" has been implemented and tested.
+---
 
-## What Was Completed
-
-### 1. Core Module Implementation (16 Python modules)
-
-**src/utils/** (3 modules)
-- `conversions.py`: dB ↔ linear power conversions
-- `coordinates.py`: Serialization, Euclidean distance calculations
-- `map_utils.py`: SLC map loading and processing
-
-**src/data_processing/** (3 modules)
-- `loader.py`: CSV/gzip data loading with filtering
-- `occupancy.py`: Duty cycle, avg power, signal variation metrics
-- `temporal.py`: Time-of-day and seasonal analysis
-
-**src/localization/** (3 modules) - **CORE ALGORITHM**
-- `path_loss.py`: Log-distance path loss model (Equation 1)
-- `transmitter.py`: Transmit power estimation (Equation 3)
-- `likelihood.py`: Covariance matrix & PMF computation (Equations 4-6)
-
-**src/interpolation/** (2 modules)
-- `idw.py`: Inverse Distance Weighting (Equations 7-8)
-- `confidence.py`: Confidence level mapping (Equation 9)
-
-**src/analysis/** (2 modules)
-- `correlation.py`: Metric correlation analysis (Table III)
-- `regression.py`: Variance prediction model (Figure 6)
-
-**src/visualization/** (3 modules)
-- `spatial_plots.py`: Transmit power, PMF, signal estimates (Figures 3, 4, 7)
-- `temporal_plots.py`: Time-of-day and seasonal plots (Figure 5)
-- `analysis_plots.py`: Histograms, regression, correlations (Figures 2, 6)
-
-### 2. Pipeline Scripts (5 scripts)
-
-- `01_process_occupancy.py`: Extract occupancy metrics from raw data
-- `02_estimate_signals.py`: Run localization algorithm
-- `03_temporal_analysis.py`: Perform temporal and correlation analysis
-- `04_generate_figures.py`: Generate all publication figures
-- `run_full_pipeline.py`: Orchestrate complete workflow
-
-### 3. Configuration Files
-
-- `config/parameters.yaml`: All algorithm parameters and band configurations
-- `config/monitoring_locations.yaml`: Monitoring station coordinates
-
-### 4. Documentation & Testing
-
-- `notebooks/paper_reproduction.ipynb`: Interactive step-by-step reproduction
-- `scripts/test_equivalency.py`: Comprehensive testing suite
-- `README.md`: Complete usage documentation
-- `IMPLEMENTATION_SUMMARY.md`: Technical implementation details
-
-### 5. Project Files
-
-- `requirements.txt`: Python dependencies
-- `setup.py`: Package installation configuration
-- `.gitignore`: Proper exclusions for Python projects
-
-## Paper Equation → Code Mapping
-
-All 9 equations from the paper are implemented:
-
-| Equation | Description | Module | Function |
-|----------|-------------|--------|----------|
-| Eq. 1 | Log-distance path loss | `localization/path_loss.py` | `log_distance_path_loss()` |
-| Eq. 2 | Error vector | `localization/transmitter.py` | `compute_error_vector()` |
-| Eq. 3 | Transmit power optimization | `localization/transmitter.py` | `minimize_transmit_power()` |
-| Eq. 4 | Gaussian likelihood | `localization/likelihood.py` | `compute_likelihood()` |
-| Eq. 5 | Covariance matrix | `localization/likelihood.py` | `build_covariance_matrix()` |
-| Eq. 6 | Received power estimate | `localization/likelihood.py` | `estimate_received_power_map()` |
-| Eq. 7 | IDW interpolation | `interpolation/idw.py` | `idw_interpolation()` |
-| Eq. 8 | IDW weights | `interpolation/idw.py` | `idw_weights()` |
-| Eq. 9 | Confidence level | `interpolation/confidence.py` | `calculate_confidence_level()` |
-
-## Directory Structure
+## Repository Structure
 
 ```
-icc_scripts/
-├── config/
-│   ├── parameters.yaml              # Algorithm & band configurations
-│   └── monitoring_locations.yaml    # Station coordinates
-├── src/
-│   ├── utils/
-│   │   ├── __init__.py
-│   │   ├── conversions.py           # dB conversions
-│   │   ├── coordinates.py           # Distance calculations
-│   │   └── map_utils.py             # Map loading
+latent-sc/
+├── config/                      # Configuration files
+│   ├── parameters.yaml          # Algorithm parameters
+│   └── monitoring_locations*.yaml  # Monitoring station configs
+├── data/                        # Data directory
+│   ├── rf_baseline/            # Paper data
+│   └── processed/              # Processed custom data
+├── notebooks/                   # Jupyter notebooks
+│   ├── paper_reproduction.ipynb       # Paper analysis
+│   └── custom_data_localization.ipynb # Custom data example
+├── scripts/                     # Processing scripts
+│   ├── process_raw_data_to_monitoring.py  # IQ → YAML
+│   ├── 01_process_occupancy.py
+│   ├── 02_estimate_signals.py
+│   ├── 03_temporal_analysis.py
+│   ├── 04_generate_figures.py
+│   └── run_full_pipeline.py
+├── src/                         # Source code
 │   ├── data_processing/
-│   │   ├── __init__.py
-│   │   ├── loader.py                # Data loading
-│   │   ├── occupancy.py             # Occupancy metrics
-│   │   └── temporal.py              # Temporal analysis
-│   ├── localization/
-│   │   ├── __init__.py
-│   │   ├── path_loss.py             # Path loss model
-│   │   ├── transmitter.py           # Tx power estimation
-│   │   └── likelihood.py            # Likelihood & PMF
-│   ├── interpolation/
-│   │   ├── __init__.py
-│   │   ├── idw.py                   # IDW interpolation
-│   │   └── confidence.py            # Confidence mapping
-│   ├── analysis/
-│   │   ├── __init__.py
-│   │   ├── correlation.py           # Metric correlations
-│   │   └── regression.py            # Variance regression
-│   └── visualization/
-│       ├── __init__.py
-│       ├── spatial_plots.py         # Spatial visualizations
-│       ├── temporal_plots.py        # Temporal plots
-│       └── analysis_plots.py        # Analysis figures
-├── scripts/
-│   ├── 01_process_occupancy.py      # Step 1: Occupancy metrics
-│   ├── 02_estimate_signals.py       # Step 2: Signal estimation
-│   ├── 03_temporal_analysis.py      # Step 3: Temporal analysis
-│   ├── 04_generate_figures.py       # Step 4: Generate figures
-│   ├── run_full_pipeline.py         # Full pipeline runner
-│   ├── test_equivalency.py          # Equivalency testing
-│   └── test_basic_functions.py      # Basic function testing
-├── notebooks/
-│   └── paper_reproduction.ipynb     # Interactive reproduction
-├── data/
-│   ├── raw/                         # Raw spectrum data
-│   ├── processed/                   # Processed metrics
-│   └── results/                     # Final results & figures
-├── README.md                        # Main documentation
-├── IMPLEMENTATION_SUMMARY.md        # Technical details
-├── requirements.txt                 # Dependencies
-├── setup.py                        # Package setup
-└── .gitignore                      # Git exclusions
+│   │   ├── iq_processor.py     # IQ processing
+│   │   ├── occupancy.py
+│   │   └── temporal.py
+│   ├── localization/           # Localization algorithms
+│   ├── interpolation/          # IDW interpolation
+│   ├── analysis/               # Statistical analysis
+│   ├── utils/                  # Coordinate transforms, conversions
+│   └── visualization/          # Plotting functions
+├── tests/                       # Unit tests
+├── CUSTOM_DATA_PIPELINE.md     # Custom data guide
+└── EBC_USTAR_SEPARATION.md     # Transmitter guide
 ```
 
-## How to Use
+---
 
-### Option 1: Run Full Pipeline
+## Features
 
+### Core Localization & Analysis
+- **Likelihood-based Localization**: Estimate transmitter location and power
+- **Signal Power Estimation**: Predict signal strength at unmeasured locations
+- **Spatial Interpolation**: IDW with confidence bounds
+- **Temporal Analysis**: Time-of-day and seasonal variations
+- **Occupancy Metrics**: Duty cycle, average power, signal statistics
+- **Visualization**: Spatial heatmaps, temporal plots, analysis figures
+
+### Custom Data Processing Pipeline
+- **Raw IQ Processing**: Convert IQ samples → monitoring locations
+- **Multi-Transmitter**: 6 transmitters across 5 frequency bands
+- **Date Filtering**: Automatic EBC (≤June 27) / USTAR (≥June 28) separation
+- **Recursive Search**: Find `samples_*` directories at any depth
+- **GPS Matching**: Nearest-neighbor with ±10s tolerance
+- **Auto-Aggregation**: Group by location with 20m deduplication
+- **YAML Generation**: Create configs compatible with notebooks
+
+---
+
+## Quick Start
+
+### Option 1: Paper Data (RF Baseline)
+
+**Run full pipeline:**
 ```bash
 python scripts/run_full_pipeline.py
 ```
 
-This executes all 4 steps:
-1. Process occupancy metrics
-2. Estimate signal strength
-3. Perform temporal analysis
-4. Generate all figures
-
-### Option 2: Run Individual Steps
-
+**Or step-by-step:**
 ```bash
 python scripts/01_process_occupancy.py
 python scripts/02_estimate_signals.py
@@ -158,55 +79,344 @@ python scripts/03_temporal_analysis.py
 python scripts/04_generate_figures.py
 ```
 
-### Option 3: Interactive Notebook
-
+**Interactive:**
 ```bash
 jupyter notebook notebooks/paper_reproduction.ipynb
 ```
 
-Step-by-step reproduction with visual checkpoints.
+### Option 2: Process Your Own IQ Data
 
-### Option 4: Python API
-
-```python
-from src.data_processing import load_monitoring_data, compute_occupancy_metrics
-from src.localization import estimate_transmit_power_map
-from src.visualization.spatial_plots import plot_transmit_power_map
-
-# Load configuration
-import yaml
-with open('config/parameters.yaml') as f:
-    config = yaml.safe_load(f)
-
-# Load data
-df = load_monitoring_data('Bookstore', 3610, 3650)
-
-# Compute metrics
-metrics = compute_occupancy_metrics(df, 3610, 3650, -105, -105)
-
-# Run localization
-tx_power_map = estimate_transmit_power_map(...)
-
-# Generate figure
-plot_transmit_power_map(tx_power_map, ...)
+**Step 1: Process raw IQ samples**
+```bash
+python scripts/process_raw_data_to_monitoring.py \
+    --input-dir "C:/Users/serha/raw_data/driving/" \
+    --transmitter mario \
+    --num-locations 10 \
+    --output-yaml "config/monitoring_locations_mario.yaml"
 ```
 
-## Performance Features
+**Step 2: Run localization**
+```bash
+jupyter notebook notebooks/custom_data_localization.ipynb
+```
 
-- **Parallel Processing**: Transmit power estimation uses all CPU cores via joblib
-- **Efficient Storage**: Results saved as compressed NumPy arrays (.npz)
-- **Batch Processing**: Pipeline scripts process multiple bands/monitors efficiently
-- **Memory Management**: Large datasets processed in chunks where applicable
+**See detailed guide**: [CUSTOM_DATA_PIPELINE.md](CUSTOM_DATA_PIPELINE.md)
 
-## Figure Generation
+---
 
-The modular code can reproduce all 7 figures from the paper:
+## 🚀 Custom Data Pipeline
 
-- **Figure 2**: Power histograms with occupancy thresholds
-- **Figure 3a**: Estimated transmit power distribution
-- **Figure 3b**: Transmitter location probability mass function
-- **Figure 3c**: Predicted signal strength map
-- **Figure 4**: Combined power/duty cycle spatial visualization
-- **Figure 5**: Temporal analysis (time-of-day and seasonal)
-- **Figure 6**: Variance regression model
-- **Figure 7**: Signal variation and confidence maps
+### Supported Transmitters
+
+| Transmitter | Channel | Frequency (MHz) | Date Range |
+|-------------|---------|-----------------|------------|
+| `ebc` | TX1 | 3533.904 - 3533.931 | ≤ June 27, 2023 |
+| `ustar` | TX1 | 3533.904 - 3533.931 | ≥ June 28, 2023 |
+| `guesthouse` | TX2 | 3533.945 - 3533.973 | All dates |
+| `mario` | TX3 | 3533.986 - 3534.014 | All dates |
+| `moran` | TX4 | 3534.028 - 3534.055 | All dates |
+| `wasatch` | TX5 | 3534.069 - 3534.096 | All dates |
+
+**Note**: EBC and USTAR share TX1 frequency band but are date-separated (transmitter replacement on June 28, 2023).
+
+### Processing Workflow
+
+```
+Raw IQ Samples (.npy) + GPS Data (.txt/.gpx)
+              ↓
+  [Recursive Directory Search]
+              ↓
+  [Load IQ Samples & GPS Coordinates]
+              ↓
+  [Compute PSD, Extract Channel Power]
+              ↓
+  [Match with GPS (±10s tolerance)]
+              ↓
+  [Apply Date Filter (EBC/USTAR)]
+              ↓
+  [Aggregate by Location (20m radius)]
+              ↓
+monitoring_locations.yaml + Processed Data
+              ↓
+  [Localization & Power Estimation]
+```
+
+### Usage Examples
+
+**Process stationary data:**
+```bash
+python scripts/process_raw_data_to_monitoring.py \
+    --input-dir "C:/Users/serha/raw_data/stat_rot/stat/" \
+    --transmitter mario \
+    --num-locations 10
+```
+
+**Process driving data (EBC - June 27 only):**
+```bash
+python scripts/process_raw_data_to_monitoring.py \
+    --input-dir "C:/Users/serha/raw_data/driving/" \
+    --transmitter ebc \
+    --num-locations 8
+# Recursively finds all sample directories
+# Automatically filters to keep only June 27 data
+```
+
+**Process walking data (USTAR - June 28+):**
+```bash
+python scripts/process_raw_data_to_monitoring.py \
+    --input-dir "C:/Users/serha/raw_data/walking/" \
+    --transmitter ustar \
+    --num-locations 15
+# Recursively finds all sample directories
+# Automatically filters to keep only June 28+ data
+```
+
+### Key Features
+
+**Recursive Search**: Finds `samples_*` at any nesting level
+**Auto GPS Detection**: Detects GPS directory based on input path
+**Date Filtering**: EBC/USTAR separated by June 28 split date
+**Time Matching**: ±10 second tolerance for GPS/IQ alignment
+**Location Grouping**: 20m deduplication radius
+**Flexible Config**: All parameters customizable via CLI
+
+### Example Output
+
+**Command:**
+```bash
+python scripts/process_raw_data_to_monitoring.py \
+    --input-dir "C:/Users/serha/raw_data/driving/" \
+    --transmitter ebc \
+    --num-locations 3
+```
+
+**Results:**
+```
+Found 11 sample directories
+Loaded 9828 IQ samples
+Date filter: samples before 2023-06-28T00:00:00 (EBC period)
+Skipped 3863 samples outside EBC date range
+Matched 5852 measurements with GPS coordinates
+Aggregated to 337 locations with >=5 samples
+
+Generated:
+- config/monitoring_locations_ebc.yaml
+- data/processed/ebc/ebc_avg_powers.npy
+- data/processed/ebc/ebc_summary.csv
+```
+
+---
+
+## Module Overview
+
+### `src/data_processing/`
+- **`iq_processor.py`**: Raw IQ processing
+  - `load_iq_samples_from_directories()`: Load from .npy files
+  - `load_gps_from_csv()`: Load GPS with timezone handling
+  - `process_iq_sample()`: Compute PSD, extract power
+  - `match_power_with_gps()`: Match with date filtering
+  - `aggregate_measurements_by_location()`: Group by position
+  - Transmitter-to-channel mapping with EBC/USTAR split
+- `loader.py`: Monitoring data loading
+- `occupancy.py`: Occupancy metrics
+- `temporal.py`: Temporal filtering
+
+### `src/localization/`
+- `likelihood.py`: Likelihood-based transmitter localization
+- `transmitter.py`: Transmitter location estimation
+- `path_loss.py`: Path loss models
+
+### `src/interpolation/`
+- `idw.py`: Inverse Distance Weighting
+- `confidence.py`: Confidence bound estimation
+
+### `src/utils/`
+- `coordinates.py`: Coordinate transformations (lat/lon ↔ UTM ↔ pixel)
+- `conversions.py`: Unit conversions (dB ↔ linear)
+- `map_utils.py`: Map loading
+- `location_utils.py`: Monitoring location utilities
+
+### `src/visualization/`
+- `spatial_plots.py`: Spatial heatmaps and maps
+- `temporal_plots.py`: Time series plots
+- `analysis_plots.py`: Statistical analysis figures
+
+### `scripts/`
+- **`process_raw_data_to_monitoring.py`**: IQ processing CLI
+  - Recursive directory search
+  - Auto GPS detection
+  - Date-based filtering
+  - YAML generation
+
+---
+
+## Configuration
+
+### Algorithm Parameters
+
+Edit `config/parameters.yaml`:
+- Spatial resolution and map settings
+- Path loss exponents
+- Localization parameters
+- Interpolation settings
+- Visualization preferences
+
+### Monitoring Locations
+
+**For paper data:**
+```python
+from src.utils import load_monitoring_locations, load_slc_map
+
+map_data = load_slc_map("../", downsample_factor=10)
+locations = load_monitoring_locations("config/monitoring_locations.yaml", map_data)
+```
+
+**For custom data:**
+```bash
+# Generate config
+python scripts/process_raw_data_to_monitoring.py \
+    --input-dir "path/to/data/" \
+    --transmitter mario \
+    --num-locations 10 \
+    --output-yaml "config/monitoring_locations_mario.yaml"
+```
+
+```python
+# Load in notebook
+locations = load_monitoring_locations("config/monitoring_locations_mario.yaml", map_data)
+observed_powers = np.load("data/processed/mario/mario_avg_powers.npy")
+```
+
+---
+
+## IQ Data Processing Details
+
+### Input Format
+
+**IQ Samples:**
+- Complex samples: I + jQ
+- Sample rate: 220 kHz
+- Center frequency: 3.534 GHz
+- Format: NumPy arrays (.npy)
+
+**GPS Data:**
+- CSV format: `date time`, `latitude`, `longitude`
+- Timestamps: UTC (auto-converted to local)
+- Offset: -6 hours for UTC-6
+
+### Processing Steps
+
+1. **Recursive Search**: Find all `samples_*` directories
+2. **Load IQ**: Read complex samples from .npy files
+3. **Load GPS**: Read coordinates from CSV/GPX
+4. **Hamming Window**: Reduce spectral leakage
+5. **FFT**: Transform to frequency domain
+6. **PSD**: Compute Power Spectral Density (dB)
+7. **Extract Power**: Max power in transmitter band
+8. **GPS Match**: Nearest-neighbor (±10s tolerance)
+9. **Date Filter**: Apply EBC/USTAR separation
+10. **Aggregate**: Group within 20m radius
+11. **Export**: Generate YAML + processed data
+
+### Output Files
+
+- `monitoring_locations_<tx>.yaml` - Station coordinates
+- `<tx>_avg_powers.npy` - Average power per location
+- `<tx>_latitudes.npy` - Latitude values
+- `<tx>_longitudes.npy` - Longitude values
+- `<tx>_std_powers.npy` - Power standard deviations
+- `<tx>_sample_counts.npy` - Samples per location
+- `<tx>_summary.csv` - Human-readable summary
+
+---
+
+## Documentation
+
+- **[CUSTOM_DATA_PIPELINE.md](CUSTOM_DATA_PIPELINE.md)**: Complete guide for processing raw IQ data
+  - Detailed workflow explanation
+  - Command-line arguments reference
+  - Usage examples for different data sources
+  - Troubleshooting guide
+
+- **[EBC_USTAR_SEPARATION.md](EBC_USTAR_SEPARATION.md)**: EBC/USTAR transmitter separation
+  - Date-based filtering details
+  - Test results and validation
+  - Usage recommendations
+
+---
+
+## Examples
+
+### Process Custom Data End-to-End
+
+```bash
+# 1. Process raw IQ samples
+python scripts/process_raw_data_to_monitoring.py \
+    --input-dir "C:/Users/serha/raw_data/driving/" \
+    --transmitter mario \
+    --num-locations 10 \
+    --output-yaml "config/monitoring_locations_mario.yaml" \
+    --output-data "data/processed/mario/"
+
+# 2. Use in Python
+from src.utils import load_monitoring_locations, load_slc_map
+from src.localization import estimate_transmit_power_map
+import numpy as np
+
+# Load map and locations
+map_data = load_slc_map("../", downsample_factor=10)
+locations = load_monitoring_locations("config/monitoring_locations_mario.yaml", map_data)
+
+# Load processed measurements
+observed_powers = np.load("data/processed/mario/mario_avg_powers.npy")
+sensor_locs = get_sensor_locations_array(locations)
+
+# Run localization
+tx_power_map = estimate_transmit_power_map(
+    map_shape=map_data['shape'],
+    sensor_locations=sensor_locs,
+    observed_powers=observed_powers,
+    scale=5.0,
+    np_exponent=2.0
+)
+```
+
+---
+
+## Changelog
+
+### Version 1.1 (Latest)
+
+**New Features:**
+- Raw IQ sample processing pipeline
+- Multi-transmitter support (6 transmitters, 5 frequency bands)
+- EBC/USTAR date-based automatic separation
+- Recursive directory search for nested structures
+- GPS coordinate auto-matching with time tolerance
+- Location aggregation with spatial deduplication
+- Custom data localization notebook
+- Comprehensive documentation (2 new guides)
+
+**Improvements:**
+- Enhanced coordinate conversion utilities
+- Monitoring location loading with auto lat/lon → pixel conversion
+- Better error handling and progress reporting
+
+### Version 1.0
+
+- Initial release with paper reproduction code
+- Likelihood-based localization
+- Signal power estimation
+- Spatial interpolation (IDW)
+- Temporal analysis
+- Visualization tools
+
+---
+
+## Support
+
+For questions or issues:
+1. Check [CUSTOM_DATA_PIPELINE.md](CUSTOM_DATA_PIPELINE.md) for usage guidance
+2. Review [EBC_USTAR_SEPARATION.md](EBC_USTAR_SEPARATION.md) for transmitter details
+3. Examine example notebook: `notebooks/custom_data_localization.ipynb`
+4. Run `python scripts/process_raw_data_to_monitoring.py --help`
