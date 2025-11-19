@@ -72,7 +72,8 @@ def find_indices_outside(arr: np.ndarray, a: float, b: float) -> List[int]:
     return indices
 
 
-def compute_psd(iq_samples: np.ndarray, sample_rate: float, center_freq: float) -> Tuple[np.ndarray, np.ndarray]:
+def compute_psd(iq_samples: np.ndarray, sample_rate: float, center_freq: float,
+                return_linear: bool = False) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
     """
     Compute Power Spectral Density (PSD) from IQ samples.
 
@@ -86,13 +87,16 @@ def compute_psd(iq_samples: np.ndarray, sample_rate: float, center_freq: float) 
         Sampling rate in Hz
     center_freq : float
         Center frequency in Hz
+    return_linear : bool, optional
+        If True, also return linear PSD (default: False for backward compatibility)
 
     Returns
     -------
-    Tuple[np.ndarray, np.ndarray]
-        (frequencies, PSD_shifted) where:
+    Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]
+        (frequencies, PSD_shifted, PSD_linear_shifted) where:
         - frequencies: Frequency array centered around center_freq
         - PSD_shifted: PSD in dB (10*log10(W/Hz)), frequency-shifted
+        - PSD_linear_shifted: PSD in linear scale (W/Hz), frequency-shifted (only if return_linear=True, else None)
     """
     nsamps = len(iq_samples)
 
@@ -108,7 +112,11 @@ def compute_psd(iq_samples: np.ndarray, sample_rate: float, center_freq: float) 
     f = np.arange(sample_rate / -2.0, sample_rate / 2.0, sample_rate / nsamps)
     f += center_freq
 
-    return f, PSD_shifted
+    if return_linear:
+        PSD_linear_shifted = np.fft.fftshift(PSD)
+        return f, PSD_shifted, PSD_linear_shifted
+    else:
+        return f, PSD_shifted, None
 
 
 def extract_channel_power(
@@ -142,6 +150,44 @@ def extract_channel_power(
     # Create a copy and mask out-of-channel values
     psd_channel = psd.copy()
     psd_channel[idx] = -200  # Very low value to exclude from max
+
+    # Find maximum power in channel
+    arg_max = np.argmax(psd_channel)
+
+    return psd_channel[arg_max]
+
+
+def extract_channel_power_linear(
+    frequencies: np.ndarray,
+    psd_linear: np.ndarray,
+    channel_min: float,
+    channel_max: float
+) -> float:
+    """
+    Extract maximum linear power for a specific RF channel.
+
+    Parameters
+    ----------
+    frequencies : np.ndarray
+        Frequency array
+    psd_linear : np.ndarray
+        Power spectral density array in linear scale (W/Hz)
+    channel_min : float
+        Minimum frequency of the channel
+    channel_max : float
+        Maximum frequency of the channel
+
+    Returns
+    -------
+    float
+        Maximum power in linear scale (W/Hz) within the channel
+    """
+    # Find indices outside the channel range
+    idx = find_indices_outside(frequencies, channel_min, channel_max)
+
+    # Create a copy and mask out-of-channel values
+    psd_channel = psd_linear.copy()
+    psd_channel[idx] = 0  # Zero out values outside channel
 
     # Find maximum power in channel
     arg_max = np.argmax(psd_channel)
@@ -183,12 +229,81 @@ def process_iq_sample(
     channel_min, channel_max = RF_CHANNELS[channel_name]
 
     # Compute PSD
-    frequencies, psd = compute_psd(iq_samples, sample_rate, center_freq)
+    frequencies, psd, _ = compute_psd(iq_samples, sample_rate, center_freq)
 
     # Extract power for the specific channel
     power = extract_channel_power(frequencies, psd, channel_min, channel_max)
 
     return power
+
+
+def process_iq_sample_multi_transmitter(
+    iq_samples: np.ndarray,
+    transmitter_names: List[str],
+    sample_rate: float = DEFAULT_SAMPLE_RATE,
+    center_freq: float = DEFAULT_CENTER_FREQ
+) -> float:
+    """
+    Process IQ samples and extract summed power for multiple transmitters.
+
+    This function computes the PSD once, then extracts linear power for each
+    transmitter, sums them in linear domain, and converts to dB.
+
+    Parameters
+    ----------
+    iq_samples : np.ndarray
+        Complex IQ samples
+    transmitter_names : List[str]
+        List of transmitter names to extract and sum power for
+    sample_rate : float, optional
+        Sampling rate in Hz (default: 220 kHz)
+    center_freq : float, optional
+        Center frequency in Hz (default: 3.534 GHz)
+
+    Returns
+    -------
+    float
+        Summed power value in dB for the specified transmitters
+
+    Raises
+    ------
+    ValueError
+        If any transmitter name is invalid or if ebc and ustar are both in the list
+    """
+    # Validate transmitter names
+    for transmitter_name in transmitter_names:
+        if transmitter_name not in TRANSMITTER_TO_CHANNEL:
+            raise ValueError(f"Unknown transmitter: {transmitter_name}. "
+                            f"Valid options: {list(TRANSMITTER_TO_CHANNEL.keys())}")
+
+    # Check for ebc/ustar conflict
+    has_ebc = 'ebc' in transmitter_names
+    has_ustar = 'ustar' in transmitter_names
+    if has_ebc and has_ustar:
+        raise ValueError("Cannot process both 'ebc' and 'ustar' transmitters in the same list. "
+                        "They share the same frequency band but never transmit simultaneously.")
+
+    # Compute PSD with linear output
+    frequencies, psd_db, psd_linear = compute_psd(iq_samples, sample_rate, center_freq, return_linear=True)
+
+    # Extract and sum linear powers for all transmitters
+    total_linear_power = 0.0
+    for transmitter_name in transmitter_names:
+        channel_name = TRANSMITTER_TO_CHANNEL[transmitter_name]
+        channel_min, channel_max = RF_CHANNELS[channel_name]
+
+        # Extract linear power for this channel
+        linear_power = extract_channel_power_linear(frequencies, psd_linear, channel_min, channel_max)
+        total_linear_power += linear_power
+
+    # Convert summed linear power to dB
+    # Avoid log of zero by checking for very small values
+    if total_linear_power > 0:
+        power_db = 10.0 * np.log10(total_linear_power)
+    else:
+        power_db = -200.0  # Very low power indicator
+
+    return power_db
 
 
 def load_iq_samples_from_directory(
@@ -325,7 +440,7 @@ def load_gps_from_csv(
 def match_power_with_gps(
     iq_data: Dict[np.datetime64, np.ndarray],
     gps_coords: Dict[np.datetime64, np.ndarray],
-    transmitter_name: str,
+    transmitter_names: List[str],
     sample_rate: float = DEFAULT_SAMPLE_RATE,
     center_freq: float = DEFAULT_CENTER_FREQ,
     progress_interval: int = 100,
@@ -340,6 +455,11 @@ def match_power_with_gps(
     For EBC/USTAR transmitters (both using TX1), applies date filtering:
     - EBC: Only processes samples from June 27, 2023 and earlier
     - USTAR: Only processes samples from June 28, 2023 and later
+    - If neither EBC nor USTAR is in the list, all samples are processed
+    - EBC and USTAR cannot both be in the list (they never transmit simultaneously)
+
+    When multiple transmitters are specified, their linear powers are extracted
+    from the PSD, summed in linear domain, and then converted to dB.
 
     Parameters
     ----------
@@ -347,8 +467,9 @@ def match_power_with_gps(
         Dictionary mapping timestamps to IQ samples
     gps_coords : Dict[np.datetime64, np.ndarray]
         Dictionary mapping timestamps to [lon, lat] coordinates
-    transmitter_name : str
-        Name of transmitter to extract power for (ebc, ustar, guesthouse, mario, moran, wasatch)
+    transmitter_names : List[str]
+        List of transmitter names to extract and sum power for (ebc, ustar, guesthouse, mario, moran, wasatch)
+        Can also be a single transmitter name as a string for backward compatibility
     sample_rate : float, optional
         Sampling rate in Hz
     center_freq : float, optional
@@ -366,22 +487,46 @@ def match_power_with_gps(
         - 'power': float (dB)
         - 'longitude': float
         - 'latitude': float
+
+    Raises
+    ------
+    ValueError
+        If ebc and ustar are both in transmitter_names
     """
+    # Handle backward compatibility: convert string to list
+    if isinstance(transmitter_names, str):
+        transmitter_names = [transmitter_names]
+
+    # Validate that ebc and ustar are not both in the list
+    has_ebc = 'ebc' in transmitter_names
+    has_ustar = 'ustar' in transmitter_names
+    if has_ebc and has_ustar:
+        raise ValueError("Cannot process both 'ebc' and 'ustar' transmitters in the same list. "
+                        "They share the same frequency band but never transmit simultaneously.")
+
     times = sorted(list(iq_data.keys()))
     gps_times = np.array(sorted(list(gps_coords.keys())))
     measurements = []
 
-    # Determine date filter for EBC/USTAR
-    apply_date_filter = transmitter_name in ['ebc', 'ustar']
-    if apply_date_filter:
-        if transmitter_name == 'ebc':
-            date_filter_desc = f"samples before {TX1_SPLIT_DATE} (EBC period)"
-        else:  # ustar
-            date_filter_desc = f"samples from {TX1_SPLIT_DATE} onwards (USTAR period)"
+    # Determine date filter based on EBC/USTAR presence
+    apply_date_filter = has_ebc or has_ustar
+    if has_ebc:
+        date_filter_desc = f"samples before {TX1_SPLIT_DATE} (EBC period)"
+        filter_mode = 'ebc'
+    elif has_ustar:
+        date_filter_desc = f"samples from {TX1_SPLIT_DATE} onwards (USTAR period)"
+        filter_mode = 'ustar'
     else:
         date_filter_desc = "all samples"
+        filter_mode = None
 
-    print(f"Processing {len(times)} IQ samples for transmitter '{transmitter_name}'...")
+    # Determine processing mode
+    is_multi_transmitter = len(transmitter_names) > 1
+
+    tx_list_str = ', '.join(transmitter_names)
+    print(f"Processing {len(times)} IQ samples for transmitter(s): {tx_list_str}")
+    if is_multi_transmitter:
+        print(f"  Mode: Multi-transmitter (summing linear powers)")
     print(f"GPS time range: {gps_times[0]} to {gps_times[-1]}")
     print(f"IQ time range: {times[0]} to {times[-1]}")
     print(f"Time tolerance: ±{time_tolerance_seconds} seconds")
@@ -396,12 +541,12 @@ def match_power_with_gps(
         try:
             # Apply date filtering for EBC/USTAR
             if apply_date_filter:
-                if transmitter_name == 'ebc':
+                if filter_mode == 'ebc':
                     # EBC: Only use samples from June 27, 2023 and earlier
                     if time >= TX1_SPLIT_DATE:
                         skipped_by_date += 1
                         continue
-                else:  # ustar
+                elif filter_mode == 'ustar':
                     # USTAR: Only use samples from June 28, 2023 and later
                     if time < TX1_SPLIT_DATE:
                         skipped_by_date += 1
@@ -414,12 +559,22 @@ def match_power_with_gps(
 
             if min_diff <= time_tolerance_seconds:
                 # Process IQ sample to extract power
-                power = process_iq_sample(
-                    iq_data[time],
-                    transmitter_name,
-                    sample_rate,
-                    center_freq
-                )
+                if is_multi_transmitter:
+                    # Multi-transmitter mode: sum linear powers
+                    power = process_iq_sample_multi_transmitter(
+                        iq_data[time],
+                        transmitter_names,
+                        sample_rate,
+                        center_freq
+                    )
+                else:
+                    # Single transmitter mode: backward compatible
+                    power = process_iq_sample(
+                        iq_data[time],
+                        transmitter_names[0],
+                        sample_rate,
+                        center_freq
+                    )
 
                 gps_time = gps_times[nearest_idx]
                 lon, lat = gps_coords[gps_time]
@@ -436,7 +591,8 @@ def match_power_with_gps(
             continue
 
     if apply_date_filter and skipped_by_date > 0:
-        print(f"Skipped {skipped_by_date} samples outside {transmitter_name.upper()} date range")
+        filter_label = 'EBC' if filter_mode == 'ebc' else 'USTAR'
+        print(f"Skipped {skipped_by_date} samples outside {filter_label} date range")
 
     print(f"Matched {len(measurements)} measurements with GPS coordinates")
     return measurements

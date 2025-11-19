@@ -36,7 +36,8 @@ from src.data_processing.iq_processor import (
     match_power_with_gps,
     aggregate_measurements_by_location,
     TRANSMITTER_TO_CHANNEL,
-    RF_CHANNELS
+    RF_CHANNELS,
+    process_iq_sample_multi_transmitter
 )
 
 
@@ -130,7 +131,7 @@ def find_gps_files(gps_dir: Path, file_pattern: str = "*.txt") -> List[Path]:
 
 def generate_monitoring_yaml(
     locations: List[Dict],
-    transmitter_name: str,
+    transmitter_names: List[str],
     output_path: Path,
     utm_zone: int = 12,
     northern_hemisphere: bool = True
@@ -142,8 +143,8 @@ def generate_monitoring_yaml(
     ----------
     locations : List[Dict]
         List of location dictionaries from aggregate_measurements_by_location()
-    transmitter_name : str
-        Name of the transmitter used
+    transmitter_names : List[str]
+        List of transmitter names used
     output_path : Path
         Output YAML file path
     utm_zone : int, optional
@@ -158,12 +159,22 @@ def generate_monitoring_yaml(
         'data_points': []
     }
 
+    # Build transmitter info for header
+    if len(transmitter_names) == 1:
+        tx_info = f"# Transmitter: {transmitter_names[0]}\n"
+        tx_info += f"# RF Channel: {TRANSMITTER_TO_CHANNEL[transmitter_names[0]]} {RF_CHANNELS[TRANSMITTER_TO_CHANNEL[transmitter_names[0]]]}\n"
+    else:
+        tx_info = f"# Transmitters: {', '.join(transmitter_names)} (combined power)\n"
+        tx_info += "# RF Channels:\n"
+        for tx_name in transmitter_names:
+            channel = TRANSMITTER_TO_CHANNEL[tx_name]
+            freq_range = RF_CHANNELS[channel]
+            tx_info += f"#   {tx_name}: {channel} {freq_range}\n"
+
     # Add comment header
     header_comment = f"""# Monitoring Station Locations
 # Auto-generated from raw IQ data processing
-# Transmitter: {transmitter_name}
-# RF Channel: {TRANSMITTER_TO_CHANNEL[transmitter_name]} {RF_CHANNELS[TRANSMITTER_TO_CHANNEL[transmitter_name]]}
-# Coordinates in latitude/longitude (WGS84)
+{tx_info}# Coordinates in latitude/longitude (WGS84)
 # Format: [longitude, latitude] (negative longitude for West)
 # These will be automatically converted to pixel coordinates using the SLC map
 
@@ -193,7 +204,7 @@ def generate_monitoring_yaml(
 
 def save_processed_data(
     locations: List[Dict],
-    transmitter_name: str,
+    transmitter_names: List[str],
     output_dir: Path
 ) -> None:
     """
@@ -203,12 +214,18 @@ def save_processed_data(
     ----------
     locations : List[Dict]
         List of location dictionaries
-    transmitter_name : str
-        Name of the transmitter
+    transmitter_names : List[str]
+        List of transmitter names used
     output_dir : Path
         Output directory for processed data
     """
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create a file-safe name for multiple transmitters
+    if len(transmitter_names) == 1:
+        file_prefix = transmitter_names[0]
+    else:
+        file_prefix = "_".join(sorted(transmitter_names))
 
     # Save as numpy arrays
     names = [loc['name'] for loc in locations]
@@ -218,12 +235,12 @@ def save_processed_data(
     stds = np.array([loc['std_power'] for loc in locations])
     counts = np.array([loc['num_samples'] for loc in locations])
 
-    np.save(output_dir / f"{transmitter_name}_names.npy", names)
-    np.save(output_dir / f"{transmitter_name}_latitudes.npy", lats)
-    np.save(output_dir / f"{transmitter_name}_longitudes.npy", lons)
-    np.save(output_dir / f"{transmitter_name}_avg_powers.npy", powers)
-    np.save(output_dir / f"{transmitter_name}_std_powers.npy", stds)
-    np.save(output_dir / f"{transmitter_name}_sample_counts.npy", counts)
+    np.save(output_dir / f"{file_prefix}_names.npy", names)
+    np.save(output_dir / f"{file_prefix}_latitudes.npy", lats)
+    np.save(output_dir / f"{file_prefix}_longitudes.npy", lons)
+    np.save(output_dir / f"{file_prefix}_avg_powers.npy", powers)
+    np.save(output_dir / f"{file_prefix}_std_powers.npy", stds)
+    np.save(output_dir / f"{file_prefix}_sample_counts.npy", counts)
 
     # Save as CSV for easy viewing
     import pandas as pd
@@ -235,13 +252,13 @@ def save_processed_data(
         'Std_Power_dB': stds,
         'Num_Samples': counts
     })
-    df.to_csv(output_dir / f"{transmitter_name}_summary.csv", index=False)
+    df.to_csv(output_dir / f"{file_prefix}_summary.csv", index=False)
 
     print(f"\n[OK] Saved processed data to: {output_dir}")
-    print(f"  Files: {transmitter_name}_*.npy and {transmitter_name}_summary.csv")
+    print(f"  Files: {file_prefix}_*.npy and {file_prefix}_summary.csv")
 
 
-def print_summary(locations: List[Dict], transmitter_name: str) -> None:
+def print_summary(locations: List[Dict], transmitter_names: List[str]) -> None:
     """
     Print summary of processed locations.
 
@@ -249,18 +266,28 @@ def print_summary(locations: List[Dict], transmitter_name: str) -> None:
     ----------
     locations : List[Dict]
         List of location dictionaries
-    transmitter_name : str
-        Name of the transmitter
+    transmitter_names : List[str]
+        List of transmitter names
     """
-    channel = TRANSMITTER_TO_CHANNEL[transmitter_name]
-    freq_range = RF_CHANNELS[channel]
-
     print("\n" + "="*80)
     print("PROCESSING SUMMARY")
     print("="*80)
-    print(f"Transmitter: {transmitter_name}")
-    print(f"RF Channel: {channel}")
-    print(f"Frequency Range: {freq_range[0]/1e6:.3f} - {freq_range[1]/1e6:.3f} MHz")
+
+    if len(transmitter_names) == 1:
+        transmitter_name = transmitter_names[0]
+        channel = TRANSMITTER_TO_CHANNEL[transmitter_name]
+        freq_range = RF_CHANNELS[channel]
+        print(f"Transmitter: {transmitter_name}")
+        print(f"RF Channel: {channel}")
+        print(f"Frequency Range: {freq_range[0]/1e6:.3f} - {freq_range[1]/1e6:.3f} MHz")
+    else:
+        print(f"Transmitters: {', '.join(transmitter_names)} (combined power)")
+        print(f"RF Channels:")
+        for tx_name in transmitter_names:
+            channel = TRANSMITTER_TO_CHANNEL[tx_name]
+            freq_range = RF_CHANNELS[channel]
+            print(f"  {tx_name}: {channel} ({freq_range[0]/1e6:.3f} - {freq_range[1]/1e6:.3f} MHz)")
+
     print(f"Number of Locations: {len(locations)}")
     print("\n" + "-"*80)
     print(f"{'Name':<15} {'Latitude':>10} {'Longitude':>11} {'Avg Power':>10} {'Std':>8} {'Samples':>8}")
@@ -287,6 +314,12 @@ Examples:
       --num-locations 10 \\
       --output-yaml "config/monitoring_locations_mario.yaml"
 
+  # Process multiple transmitters (combined power)
+  python scripts/process_raw_data_to_monitoring.py \\
+      --input-dir "C:/Users/serha/raw_data/stat_rot/stat/" \\
+      --transmitter mario,moran,wasatch \\
+      --num-locations 10
+
   # Process with custom GPS directory
   python scripts/process_raw_data_to_monitoring.py \\
       --input-dir "C:/Users/serha/raw_data/stat_rot/stat/" \\
@@ -298,6 +331,7 @@ Available transmitters: ebc, ustar, guesthouse, mario, moran, wasatch
   Note: ebc and ustar share TX1 frequency band but are date-separated:
     - ebc: Data from June 27, 2023 and earlier
     - ustar: Data from June 28, 2023 and later
+    - ebc and ustar CANNOT be combined in the same transmitter list
         """
     )
 
@@ -312,8 +346,10 @@ Available transmitters: ebc, ustar, guesthouse, mario, moran, wasatch
         "--transmitter",
         type=str,
         required=True,
-        choices=list(TRANSMITTER_TO_CHANNEL.keys()),
-        help="Transmitter name to extract power for (ebc: <=June 27, ustar: >=June 28)"
+        help="Transmitter name(s) to extract power for. Use comma-separated list for multiple transmitters "
+             "(e.g., 'mario,moran'). Multiple transmitters will have their linear powers summed. "
+             "Available: ebc (<=June 27), ustar (>=June 28), guesthouse, mario, moran, wasatch. "
+             "Note: ebc and ustar cannot be combined as they never transmit simultaneously."
     )
     parser.add_argument(
         "--num-locations",
@@ -374,12 +410,38 @@ Available transmitters: ebc, ustar, guesthouse, mario, moran, wasatch
 
     args = parser.parse_args()
 
+    # Parse transmitter names (comma-separated)
+    transmitter_names = [tx.strip() for tx in args.transmitter.split(',')]
+
+    # Validate transmitter names
+    for tx_name in transmitter_names:
+        if tx_name not in TRANSMITTER_TO_CHANNEL:
+            print(f"Error: Unknown transmitter '{tx_name}'.")
+            print(f"Valid options: {', '.join(TRANSMITTER_TO_CHANNEL.keys())}")
+            return 1
+
+    # Validate that ebc and ustar are not both in the list
+    has_ebc = 'ebc' in transmitter_names
+    has_ustar = 'ustar' in transmitter_names
+    if has_ebc and has_ustar:
+        print("Error: Cannot process both 'ebc' and 'ustar' transmitters in the same list.")
+        print("They share the same frequency band (TX1) but never transmit simultaneously:")
+        print("  - ebc: Active until June 27, 2023 (inclusive)")
+        print("  - ustar: Active from June 28, 2023 onwards")
+        return 1
+
+    # Create a file-safe identifier for the transmitter set
+    if len(transmitter_names) == 1:
+        transmitter_id = transmitter_names[0]
+    else:
+        transmitter_id = "_".join(sorted(transmitter_names))
+
     # Set default output paths if not specified
     if args.output_yaml is None:
-        args.output_yaml = Path(f"config/monitoring_locations_{args.transmitter}.yaml")
+        args.output_yaml = Path(f"config/monitoring_locations_{transmitter_id}.yaml")
 
     if args.output_data is None:
-        args.output_data = Path(f"data/processed/{args.transmitter}/")
+        args.output_data = Path(f"data/processed/{transmitter_id}/")
 
     # Validate input directory
     if not args.input_dir.exists():
@@ -420,7 +482,10 @@ Available transmitters: ebc, ustar, guesthouse, mario, moran, wasatch
     print("="*80)
     print(f"Input Directory: {args.input_dir}")
     print(f"GPS Directory: {args.gps_dir}")
-    print(f"Transmitter: {args.transmitter}")
+    if len(transmitter_names) == 1:
+        print(f"Transmitter: {transmitter_names[0]}")
+    else:
+        print(f"Transmitters: {', '.join(transmitter_names)} (combined power)")
     print(f"Target Locations: {args.num_locations}")
     print("="*80 + "\n")
 
@@ -462,11 +527,12 @@ Available transmitters: ebc, ustar, guesthouse, mario, moran, wasatch
     print(f"Loaded {len(gps_coords)} GPS coordinates")
 
     # Step 4: Process IQ samples and match with GPS
-    print(f"\nStep 4: Processing IQ samples for transmitter '{args.transmitter}'...")
+    tx_str = ', '.join(transmitter_names) if len(transmitter_names) > 1 else transmitter_names[0]
+    print(f"\nStep 4: Processing IQ samples for transmitter(s): {tx_str}...")
     measurements = match_power_with_gps(
         iq_data,
         gps_coords,
-        args.transmitter
+        transmitter_names
     )
 
     if not measurements:
@@ -492,19 +558,19 @@ Available transmitters: ebc, ustar, guesthouse, mario, moran, wasatch
     print(f"\nStep 6: Generating outputs...")
 
     # Print summary
-    print_summary(selected_locations, args.transmitter)
+    print_summary(selected_locations, transmitter_names)
 
     # Generate YAML
     generate_monitoring_yaml(
         selected_locations,
-        args.transmitter,
+        transmitter_names,
         args.output_yaml
     )
 
     # Save processed data
     save_processed_data(
         selected_locations,
-        args.transmitter,
+        transmitter_names,
         args.output_data
     )
 
