@@ -9,7 +9,8 @@ from .coordinates import (
 from .map_utils import load_slc_map, get_utm_coordinates, format_map_axes
 from .location_utils import (
     load_monitoring_locations, get_sensor_locations_array,
-    get_sensor_names, verify_coordinate_conversion
+    get_sensor_names, verify_coordinate_conversion,
+    load_transmitter_locations
 )
 
 __all__ = [
@@ -32,5 +33,6 @@ __all__ = [
     'load_monitoring_locations',
     'get_sensor_locations_array',
     'get_sensor_names',
-    'verify_coordinate_conversion'
+    'verify_coordinate_conversion',
+    'load_transmitter_locations'
 ]

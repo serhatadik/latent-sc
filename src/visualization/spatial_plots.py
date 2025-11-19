@@ -20,7 +20,8 @@ matplotlib.rcParams['font.size'] = 14
 
 
 def plot_transmit_power_map(transmit_power_map, data_points, observed_powers,
-                              UTM_lat, UTM_long, band_name, save_path=None):
+                              UTM_lat, UTM_long, band_name, save_path=None,
+                              transmitter_locations=None):
     """
     Create Figure 3a: Distribution of estimated transmit power.
 
@@ -40,6 +41,8 @@ def plot_transmit_power_map(transmit_power_map, data_points, observed_powers,
         Frequency band name (e.g., "3610_3650")
     save_path : str, optional
         Path to save the figure
+    transmitter_locations : dict, optional
+        Dictionary of transmitter locations from load_transmitter_locations()
 
     Returns
     -------
@@ -69,6 +72,13 @@ def plot_transmit_power_map(transmit_power_map, data_points, observed_powers,
     scatter_cbar = plt.colorbar(scatter, label='Observed Signal Strength [dBX]', location='left')
     scatter_cbar.ax.tick_params(labelsize=18)
     scatter_cbar.set_label(label='Observed Signal Strength [dBX]', size=18)
+
+    # Plot transmitter locations as blue X markers
+    if transmitter_locations is not None:
+        tx_coords = np.array([tx['coordinates'] for tx in transmitter_locations.values()])
+        plt.scatter(tx_coords[:, 0], tx_coords[:, 1],
+                   marker='x', s=200, c='blue', linewidth=3,
+                   label='Transmitter Locations', zorder=10)
 
     plt.legend()
 
@@ -107,7 +117,7 @@ def plot_transmit_power_map(transmit_power_map, data_points, observed_powers,
 
 
 def plot_pmf_map(pmf, data_points, observed_powers, UTM_lat, UTM_long,
-                 band_name, save_path=None):
+                 band_name, save_path=None, transmitter_locations=None):
     """
     Create Figure 3b: 2D probability mass function of transmitter location.
 
@@ -127,6 +137,8 @@ def plot_pmf_map(pmf, data_points, observed_powers, UTM_lat, UTM_long,
         Frequency band name
     save_path : str, optional
         Path to save the figure
+    transmitter_locations : dict, optional
+        Dictionary of transmitter locations from load_transmitter_locations()
 
     Returns
     -------
@@ -156,6 +168,13 @@ def plot_pmf_map(pmf, data_points, observed_powers, UTM_lat, UTM_long,
     scatter_cbar = plt.colorbar(scatter, label='Observed Signal Strength [dBX]', location='left')
     scatter_cbar.ax.tick_params(labelsize=18)
     scatter_cbar.set_label(label='Observed Signal Strength [dBX]', size=18)
+
+    # Plot transmitter locations as blue X markers
+    if transmitter_locations is not None:
+        tx_coords = np.array([tx['coordinates'] for tx in transmitter_locations.values()])
+        plt.scatter(tx_coords[:, 0], tx_coords[:, 1],
+                   marker='x', s=200, c='blue', linewidth=3,
+                   label='Transmitter Locations', zorder=10)
 
     plt.legend()
 
@@ -192,7 +211,8 @@ def plot_pmf_map(pmf, data_points, observed_powers, UTM_lat, UTM_long,
 
 
 def plot_signal_estimates_map(signal_estimates, data_points, observed_powers,
-                               UTM_lat, UTM_long, band_name, save_path=None):
+                               UTM_lat, UTM_long, band_name, save_path=None,
+                               transmitter_locations=None):
     """
     Create Figure 3c: 2D predictions of signal strength.
 
@@ -212,6 +232,8 @@ def plot_signal_estimates_map(signal_estimates, data_points, observed_powers,
         Frequency band name
     save_path : str, optional
         Path to save the figure
+    transmitter_locations : dict, optional
+        Dictionary of transmitter locations from load_transmitter_locations()
 
     Returns
     -------
@@ -257,6 +279,13 @@ def plot_signal_estimates_map(signal_estimates, data_points, observed_powers,
     scatter_cbar.set_ticks(colorbar_ticks)
     scatter_cbar.set_label(label='Observed Signal Strength [dBX]', size=18)
     scatter_cbar.set_ticklabels(colorbar_tick_labels)
+
+    # Plot transmitter locations as blue X markers
+    if transmitter_locations is not None:
+        tx_coords = np.array([tx['coordinates'] for tx in transmitter_locations.values()])
+        plt.scatter(tx_coords[:, 0], tx_coords[:, 1],
+                   marker='x', s=200, c='blue', linewidth=3,
+                   label='Transmitter Locations', zorder=10)
 
     plt.legend()
 

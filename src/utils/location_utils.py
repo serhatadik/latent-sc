@@ -220,3 +220,64 @@ def verify_coordinate_conversion(locations_dict, verbose=True):
         print("="*80 + "\n")
 
     return results
+
+
+def load_transmitter_locations(config_path, map_data):
+    """
+    Load transmitter station locations and convert to pixel coordinates.
+
+    Parameters
+    ----------
+    config_path : str
+        Path to transmitter_locations.yaml file
+    map_data : dict
+        Map data dictionary from load_slc_map()
+
+    Returns
+    -------
+    dict
+        Dictionary mapping transmitter names to their pixel coordinates.
+        Each entry contains:
+        - 'name': Transmitter name
+        - 'latitude': Latitude in decimal degrees
+        - 'longitude': Longitude in decimal degrees
+        - 'height': Height in meters
+        - 'type': Transmitter type (Dense or Rooftop)
+        - 'coordinates': [col, row] pixel coordinates
+
+    Examples
+    --------
+    >>> map_data = load_slc_map("../", downsample_factor=10)
+    >>> tx_locs = load_transmitter_locations("config/transmitter_locations.yaml", map_data)
+    >>> tx_locs['mario']['coordinates']
+    [123, 456]
+    """
+    # Load YAML config
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
+
+    # Default to Salt Lake City UTM zone
+    utm_zone = 12
+    northern = True
+
+    transmitter_dict = {}
+
+    for tx_name, tx_data in config['transmitters'].items():
+        lat = tx_data['latitude']
+        lon = tx_data['longitude']
+        height = tx_data['height']
+        tx_type = tx_data['type']
+
+        # Convert to pixel coordinates
+        col, row = latlon_to_pixel(lat, lon, map_data, utm_zone, northern)
+
+        transmitter_dict[tx_name] = {
+            'name': tx_name,
+            'latitude': lat,
+            'longitude': lon,
+            'height': height,
+            'type': tx_type,
+            'coordinates': [col, row]  # [x, y] format
+        }
+
+    return transmitter_dict

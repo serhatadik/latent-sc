@@ -1,0 +1,40 @@
+# Transmitter Station Locations
+# Coordinates in WGS84 (latitude/longitude)
+# Heights in meters above ground level
+
+transmitters:
+  mario:
+    latitude: 40.772852
+    longitude: -111.84088
+    height: 8.8
+    type: Dense
+
+  moran:
+    latitude: 40.76988
+    longitude: -111.838716
+    height: 8.8
+    type: Dense
+
+  guesthouse:
+    latitude: 40.76749
+    longitude: -111.836082
+    height: 8.8
+    type: Dense
+
+  ebc:
+    latitude: 40.767006
+    longitude: -111.838098
+    height: 11.3
+    type: Dense
+
+  wasatch:
+    latitude: 40.771073
+    longitude: -111.843164
+    height: 8.8
+    type: Dense
+
+  ustar:
+    latitude: 40.7689874
+    longitude: -111.8416694
+    height: 25.0
+    type: Rooftop
