@@ -23,7 +23,7 @@ from ..localization.likelihood import build_covariance_matrix
 
 def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape,
                                  scale=1.0, np_exponent=2, sigma=4.5, delta_c=400,
-                                 lambda_reg=0.01, solver='auto',
+                                 lambda_reg=0.01, norm_exponent=4, solver='auto',
                                  return_linear_scale=False, verbose=True,
                                  **solver_kwargs):
     """
@@ -51,6 +51,10 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
         Sparsity regularization parameter, default: 0.01
         - Larger λ → sparser solution (fewer transmitters)
         - Smaller λ → denser solution (more transmitters)
+    norm_exponent : float, optional
+        Exponent applied to column norms for L1 penalty weighting, default: 4
+        Weight for column i is: (||a_i||_2^norm_exponent) / max(||a_j||_2^norm_exponent)
+        Higher values increase emphasis on path gain differences
     solver : {'auto', 'cvxpy', 'sklearn', 'scipy'}, optional
         Optimization solver, default: 'auto'
     return_linear_scale : bool, optional
@@ -164,7 +168,7 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
 
     t_est, solver_info = solve_sparse_reconstruction(
         A_model, W, observed_powers_linear, lambda_reg,
-        solver=solver, verbose=verbose, **solver_kwargs
+        solver=solver, norm_exponent=norm_exponent, verbose=verbose, **solver_kwargs
     )
 
     # Step 6: Reshape to map

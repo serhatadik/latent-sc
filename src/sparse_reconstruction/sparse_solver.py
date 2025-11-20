@@ -23,7 +23,10 @@ import warnings
 
 
 def solve_sparse_reconstruction(A_model, W, observed_powers, lambda_reg,
-                                 solver='scipy', verbose=True, **solver_kwargs):
+                                 solver='scipy', verbose=True, norm_exponent=4,
+                                 enable_reweighting=False, max_reweight_iter=5,
+                                 reweight_epsilon=1e-6, convergence_tol=1e-4,
+                                 **solver_kwargs):
     """
     Solve sparse reconstruction problem with automatic solver selection.
 
@@ -51,6 +54,19 @@ def solve_sparse_reconstruction(A_model, W, observed_powers, lambda_reg,
         Note: 'cvxpy' and 'sklearn' are NOT supported for the log-domain objective.
     verbose : bool, optional
         Print solver information, default: True
+    norm_exponent : float, optional
+        Exponent applied to column norms for L1 penalty weighting.
+        Weight for column i is: (||a_i||_2^norm_exponent) / max(||a_j||_2^norm_exponent)
+        Higher values increase emphasis on path gain differences. Default: 4
+    enable_reweighting : bool, optional
+        If True, use iterative reweighting to better approximate L0-norm.
+        If False, use single-step optimization (default). Default: False
+    max_reweight_iter : int, optional
+        Maximum number of reweighting iterations. Default: 5
+    reweight_epsilon : float, optional
+        Damping factor for sparsity weights to prevent division by zero. Default: 1e-6
+    convergence_tol : float, optional
+        Relative change threshold for early stopping. Default: 1e-4
     **solver_kwargs : dict
         Additional arguments passed to specific solver
 
@@ -107,7 +123,10 @@ def solve_sparse_reconstruction(A_model, W, observed_powers, lambda_reg,
 
     # Use scipy (L-BFGS-B)
     t_est, info = solve_sparse_reconstruction_scipy(
-        A_model, W, observed_powers, lambda_reg, verbose=verbose, **solver_kwargs
+        A_model, W, observed_powers, lambda_reg, verbose=verbose, 
+        norm_exponent=norm_exponent, enable_reweighting=enable_reweighting,
+        max_reweight_iter=max_reweight_iter, reweight_epsilon=reweight_epsilon,
+        convergence_tol=convergence_tol, **solver_kwargs
     )
     return t_est, info
 
@@ -130,7 +149,10 @@ def solve_sparse_reconstruction_sklearn(A_model, W, observed_powers, lambda_reg,
 
 
 def solve_sparse_reconstruction_scipy(A_model, W, observed_powers, lambda_reg,
-                                       verbose=True, max_iter=1000, epsilon=1e-20, **scipy_kwargs):
+                                       verbose=True, max_iter=1000, epsilon=1e-20, 
+                                       norm_exponent=4, enable_reweighting=False,
+                                       max_reweight_iter=5, reweight_epsilon=1e-6,
+                                       convergence_tol=1e-4, **scipy_kwargs):
     """
     Solve sparse reconstruction using scipy.optimize (L-BFGS-B) with log-domain objective.
 
@@ -154,6 +176,16 @@ def solve_sparse_reconstruction_scipy(A_model, W, observed_powers, lambda_reg,
         Maximum iterations, default: 1000
     epsilon : float, optional
         Small constant for numerical stability in log, default: 1e-20
+    norm_exponent : float, optional
+        Exponent applied to column norms for L1 penalty weighting, default: 4
+    enable_reweighting : bool, optional
+        If True, use iterative reweighting to better approximate L0-norm, default: False
+    max_reweight_iter : int, optional
+        Maximum number of reweighting iterations, default: 5
+    reweight_epsilon : float, optional
+        Damping factor for sparsity weights to prevent division by zero, default: 1e-6
+    convergence_tol : float, optional
+        Relative change threshold for early stopping, default: 1e-4
     **scipy_kwargs : dict
         Additional arguments passed to scipy.optimize.minimize
 
@@ -185,100 +217,167 @@ def solve_sparse_reconstruction_scipy(A_model, W, observed_powers, lambda_reg,
     # but W is small (MxM), so W.T @ (W @ r) is fast enough.
 
     # Precompute weights for L1 penalty (cancel path loss bias)
-    # Omega_ii = ||a_i||_2
+    # Omega_ii = ||a_i||_2^norm_exponent
     column_norms = np.linalg.norm(A_model, axis=0)
-    if column_norms.max() > 0:
-        weights = column_norms / column_norms.max()
+    column_norms_powered = column_norms ** norm_exponent
+    if column_norms_powered.max() > 0:
+        sensitivity_weights = column_norms_powered / column_norms_powered.max()
     else:
-        weights = np.ones(N)
+        sensitivity_weights = np.ones(N)
 
-    # Prepare regularization vector
-    if np.isscalar(lambda_reg):
-        # Apply computed weights to scalar lambda
-        lambda_vec = lambda_reg * weights
-    else:
-        # Use provided vector as is (assume user handled weighting)
-        lambda_vec = lambda_reg
-
-    def objective(t):
-        """
-        Objective function: ‖W(log10(A·t + ε) - log10(p + ε))‖₂² + ‖diag(λ)·t‖₁
-        """
-        # 1. Compute A·t
-        At = A_model @ t
-        
-        # 2. Compute log10(A·t + ε)
-        log_At = np.log10(At + epsilon)
-        
-        # 3. Compute residual vector in log domain: log(At) - log(p)
-        # We already have log_p, so this is log_At - log_p
-        log_diff = log_At - log_p
-        
-        # 4. Apply whitening: W(log_diff)
-        # Equivalent to W @ log_At - p_tilde
-        whitened_diff = W @ log_diff
-        
-        # 5. Data fidelity term: squared L2 norm
-        data_term = np.sum(whitened_diff**2)
-        
-        # 6. Regularization term: Weighted L1 norm
-        # lambda_vec already includes the weights
-        regularization_term = np.sum(lambda_vec * np.abs(t))
+    # Initialize for iterative reweighting
+    if enable_reweighting:
+        if verbose:
+            print(f"\n{'='*60}")
+            print(f"Iterative Reweighting Enabled")
+            print(f"{'='*60}")
+            print(f"Max iterations: {max_reweight_iter}")
+            print(f"Damping factor (ε): {reweight_epsilon:.2e}")
+            print(f"Convergence tolerance: {convergence_tol:.2e}")
+            print(f"\nIteration 0: Initial solve with sensitivity weights only")
+    
+    # Track iterations
+    t_prev = None
+    actual_iterations = 0
+    converged = False
+    
+    # Iterative reweighting loop
+    for reweight_iter in range(max_reweight_iter + 1 if enable_reweighting else 1):
+        # Update weights based on previous solution (skip for iteration 0)
+        if reweight_iter == 0 or not enable_reweighting:
+            # Iteration 0: Use only sensitivity weights
+            weights = sensitivity_weights.copy()
+        else:
+            # Iterations 1+: Combine sensitivity and sparsity weights
+            # Omega_ii^(k) = ||a_i||_2^c / (|t_i^(k-1)| + epsilon)
+            sparsity_weights = 1.0 / (np.abs(t_prev) + reweight_epsilon)
+            weights = sensitivity_weights * sparsity_weights
             
-        return data_term + regularization_term
-
-    def gradient(t):
-        """
-        Gradient of objective.
-        """
-        # Forward pass (recompute needed parts)
-        At = A_model @ t
-        u = At + epsilon
-        log_At = np.log10(u)
-        log_diff = log_At - log_p
-        whitened_diff = W @ log_diff  # This is r
-        
-        # Backprop
-        # 1. W^T * r
-        WTr = W.T @ whitened_diff
-        
-        # 2. diag(1/u) * W^T * r  => WTr / u (element-wise division)
-        term2 = WTr / u
-        
-        # 3. A^T * term2
-        grad_data_part = A_model.T @ term2
-        
-        # 4. Scale by 2 / ln(10)
-        grad_data = (2 / np.log(10)) * grad_data_part
-        
-        # Regularization gradient
-        # Gradient of sum(lambda_vec * |t|) is lambda_vec * sign(t)
-        grad_reg = lambda_vec * np.sign(t)
+            # Normalize to prevent numerical issues
+            if weights.max() > 0:
+                weights = weights / weights.max()
             
-        return grad_data + grad_reg
+            if verbose:
+                print(f"\nIteration {reweight_iter}: Refining sparsity")
+                print(f"  Previous nonzeros: {np.sum(np.abs(t_prev) > 1e-11)}")
+                print(f"  Weight range: [{weights.min():.2e}, {weights.max():.2e}]")
 
-    # Initial guess
-    # Use a small positive value to avoid log(0) issues at start
-    t0 = np.zeros(N) + 1e-8 # Start slightly away from zero (-80 dBm)
+        # Prepare regularization vector for this iteration
+        if np.isscalar(lambda_reg):
+            # Apply computed weights to scalar lambda
+            lambda_vec = lambda_reg * weights
+        else:
+            # Use provided vector as is (assume user handled weighting)
+            lambda_vec = lambda_reg
 
-    # Box constraints: t ≥ 0
-    bounds = [(0, None) for _ in range(N)]
+        def objective(t):
+            """
+            Objective function: ‖W(log10(A·t + ε) - log10(p + ε))‖₂² + ‖diag(λ)·t‖₁
+            """
+            # 1. Compute A·t
+            At = A_model @ t
+            
+            # 2. Compute log10(A·t + ε)
+            log_At = np.log10(At + epsilon)
+            
+            # 3. Compute residual vector in log domain: log(At) - log(p)
+            # We already have log_p, so this is log_At - log_p
+            log_diff = log_At - log_p
+            
+            # 4. Apply whitening: W(log_diff)
+            # Equivalent to W @ log_At - p_tilde
+            whitened_diff = W @ log_diff
+            
+            # 5. Data fidelity term: squared L2 norm
+            data_term = np.sum(whitened_diff**2)
+            
+            # 6. Regularization term: Weighted L1 norm
+            # lambda_vec already includes the weights
+            regularization_term = np.sum(lambda_vec * np.abs(t))
+                
+            return data_term + regularization_term
 
-    # Solve
-    result = minimize(
-        objective,
-        t0,
-        method='L-BFGS-B',
-        jac=gradient,
-        bounds=bounds,
-        options={'maxiter': max_iter, 'disp': verbose},
-        **scipy_kwargs
-    )
+        def gradient(t):
+            """
+            Gradient of objective.
+            """
+            # Forward pass (recompute needed parts)
+            At = A_model @ t
+            u = At + epsilon
+            log_At = np.log10(u)
+            log_diff = log_At - log_p
+            whitened_diff = W @ log_diff  # This is r
+            
+            # Backprop
+            # 1. W^T * r
+            WTr = W.T @ whitened_diff
+            
+            # 2. diag(1/u) * W^T * r  => WTr / u (element-wise division)
+            term2 = WTr / u
+            
+            # 3. A^T * term2
+            grad_data_part = A_model.T @ term2
+            
+            # 4. Scale by 2 / ln(10)
+            grad_data = (2 / np.log(10)) * grad_data_part
+            
+            # Regularization gradient
+            # Gradient of sum(lambda_vec * |t|) is lambda_vec * sign(t)
+            grad_reg = lambda_vec * np.sign(t)
+                
+            return grad_data + grad_reg
 
-    t_est = result.x
+        # Initial guess
+        # Use a small positive value to avoid log(0) issues at start
+        if reweight_iter == 0 or t_prev is None:
+            t0 = np.zeros(N) + 1e-12  # Start slightly away from zero (-80 dBm)
+        else:
+            # Warm start from previous iteration
+            t0 = t_prev.copy()
+
+        # Box constraints: t ≥ 0
+        bounds = [(0, None) for _ in range(N)]
+
+        # Solve
+        result = minimize(
+            objective,
+            t0,
+            method='L-BFGS-B',
+            jac=gradient,
+            bounds=bounds,
+            options={'maxiter': max_iter, 'disp': False},  # Suppress per-iteration output
+            **scipy_kwargs
+        )
+
+        t_est = result.x
+        actual_iterations = reweight_iter
+        
+        # Check convergence (skip for iteration 0)
+        if enable_reweighting and reweight_iter > 0 and t_prev is not None:
+            rel_change = np.linalg.norm(t_est - t_prev) / (np.linalg.norm(t_prev) + 1e-12)
+            n_nonzero = np.sum(np.abs(t_est) > 1e-11)
+            
+            if verbose:
+                print(f"  Current nonzeros: {n_nonzero}")
+                print(f"  Relative change: {rel_change:.4e}")
+                print(f"  Objective value: {result.fun:.4e}")
+            
+            if rel_change < convergence_tol:
+                converged = True
+                if verbose:
+                    print(f"\n  ✓ Converged after {reweight_iter} iterations")
+                break
+        
+        # Save for next iteration
+        t_prev = t_est.copy()
+        
+        # If not using reweighting, exit after first iteration
+        if not enable_reweighting:
+            break
+
 
     # Compute statistics
-    n_nonzero = np.sum(np.abs(t_est) > 1e-15) # Threshold slightly above floor
+    n_nonzero = np.sum(np.abs(t_est) > 1e-11) # Threshold slightly above floor
     sparsity = 1.0 - n_nonzero / N
 
     if verbose:
@@ -294,7 +393,10 @@ def solve_sparse_reconstruction_scipy(A_model, W, observed_powers, lambda_reg,
         'n_nonzero': n_nonzero,
         'sparsity': sparsity,
         'success': result.success,
-        'n_iter': result.nit
+        'n_iter': result.nit,
+        'reweighting_enabled': enable_reweighting,
+        'n_reweight_iter': actual_iterations if enable_reweighting else 0,
+        'converged': converged if enable_reweighting else True
     }
 
     return t_est, info
