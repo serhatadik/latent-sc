@@ -184,9 +184,25 @@ def solve_sparse_reconstruction_scipy(A_model, W, observed_powers, lambda_reg,
     # Precompute W^T W for gradient calculation efficiency if needed, 
     # but W is small (MxM), so W.T @ (W @ r) is fast enough.
 
+    # Precompute weights for L1 penalty (cancel path loss bias)
+    # Omega_ii = ||a_i||_2
+    column_norms = np.linalg.norm(A_model, axis=0)
+    if column_norms.max() > 0:
+        weights = column_norms / column_norms.max()
+    else:
+        weights = np.ones(N)
+
+    # Prepare regularization vector
+    if np.isscalar(lambda_reg):
+        # Apply computed weights to scalar lambda
+        lambda_vec = lambda_reg * weights
+    else:
+        # Use provided vector as is (assume user handled weighting)
+        lambda_vec = lambda_reg
+
     def objective(t):
         """
-        Objective function: ‖W(log10(A·t + ε) - log10(p + ε))‖₂² + λ‖t‖₁
+        Objective function: ‖W(log10(A·t + ε) - log10(p + ε))‖₂² + ‖diag(λ)·t‖₁
         """
         # 1. Compute A·t
         At = A_model @ t
@@ -205,29 +221,15 @@ def solve_sparse_reconstruction_scipy(A_model, W, observed_powers, lambda_reg,
         # 5. Data fidelity term: squared L2 norm
         data_term = np.sum(whitened_diff**2)
         
-        # 6. Regularization term: L1 norm
-        if np.isscalar(lambda_reg):
-            regularization_term = lambda_reg * np.sum(np.abs(t))
-        else:
-            regularization_term = np.sum(lambda_reg * np.abs(t))
+        # 6. Regularization term: Weighted L1 norm
+        # lambda_vec already includes the weights
+        regularization_term = np.sum(lambda_vec * np.abs(t))
             
         return data_term + regularization_term
 
     def gradient(t):
         """
         Gradient of objective.
-        J = r^T r + λ|t|
-        where r = W(log10(At+ε) - log10(p+ε))
-        ∇J = 2 (∂r/∂t)^T r + λ sign(t)
-        
-        Let u = At + ε
-        log10(u) = ln(u) / ln(10)
-        ∂log10(u)/∂t = (1/ln(10)) * diag(1/u) * A
-        
-        r = W * (log10(u) - log_p)
-        ∂r/∂t = W * ∂log10(u)/∂t = (1/ln(10)) * W * diag(1/u) * A
-        
-        (∂r/∂t)^T r = A^T * diag(1/u) * W^T * r * (1/ln(10))
         """
         # Forward pass (recompute needed parts)
         At = A_model @ t
@@ -250,24 +252,14 @@ def solve_sparse_reconstruction_scipy(A_model, W, observed_powers, lambda_reg,
         grad_data = (2 / np.log(10)) * grad_data_part
         
         # Regularization gradient
-        if np.isscalar(lambda_reg):
-            # Use sign(t) for L1 subgradient. Since t >= 0, sign(t) is 1 for t > 0.
-            # For t=0, subgradient is [-1, 1]. We pick 0 or 1?
-            # Usually for optimization we can use 0 or just sign.
-            # But since we have t >= 0 constraint, we can just use 1.
-            # However, to encourage true zero, standard subgradient is often used.
-            grad_reg = lambda_reg * np.sign(t)
-            # Fix for t=0? np.sign(0) = 0. This is fine.
-        else:
-            grad_reg = lambda_reg * np.sign(t)
+        # Gradient of sum(lambda_vec * |t|) is lambda_vec * sign(t)
+        grad_reg = lambda_vec * np.sign(t)
             
         return grad_data + grad_reg
 
-    # Initial guess: 
-    # A good guess might be important for non-convex problems.
-    # Maybe start with small uniform power?
-    # Or zeros. Zeros might be tricky if log(0) is problematic, but we have epsilon.
-    t0 = np.zeros(N) + 1e-10 # Start slightly away from zero
+    # Initial guess
+    # Use a small positive value to avoid log(0) issues at start
+    t0 = np.zeros(N) + 1e-20 # Start slightly away from zero (-200 dBm)
 
     # Box constraints: t ≥ 0
     bounds = [(0, None) for _ in range(N)]
@@ -286,7 +278,7 @@ def solve_sparse_reconstruction_scipy(A_model, W, observed_powers, lambda_reg,
     t_est = result.x
 
     # Compute statistics
-    n_nonzero = np.sum(np.abs(t_est) > 1e-10)
+    n_nonzero = np.sum(np.abs(t_est) > 1e-15) # Threshold slightly above floor
     sparsity = 1.0 - n_nonzero / N
 
     if verbose:
