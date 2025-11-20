@@ -26,6 +26,7 @@ def solve_sparse_reconstruction(A_model, W, observed_powers, lambda_reg,
                                  solver='scipy', verbose=True, norm_exponent=4,
                                  enable_reweighting=False, max_reweight_iter=5,
                                  reweight_epsilon=1e-6, convergence_tol=1e-4,
+                                 sparsity_threshold=0,
                                  **solver_kwargs):
     """
     Solve sparse reconstruction problem with automatic solver selection.
@@ -59,28 +60,29 @@ def solve_sparse_reconstruction(A_model, W, observed_powers, lambda_reg,
         Weight for column i is: (||a_i||_2^norm_exponent) / max(||a_j||_2^norm_exponent)
         Higher values increase emphasis on path gain differences. Default: 4
     enable_reweighting : bool, optional
-        If True, use iterative reweighting to better approximate L0-norm.
-        If False, use single-step optimization (default). Default: False
+        Enable iterative reweighting for enhanced sparsity. Default: False
     max_reweight_iter : int, optional
         Maximum number of reweighting iterations. Default: 5
     reweight_epsilon : float, optional
-        Damping factor for sparsity weights to prevent division by zero. Default: 1e-6
+        Damping factor for reweighting to prevent division by zero. Default: 1e-6
     convergence_tol : float, optional
-        Relative change threshold for early stopping. Default: 1e-4
-    **solver_kwargs : dict
-        Additional arguments passed to specific solver
+        Relative change threshold for convergence. Default: 1e-4
+    sparsity_threshold : float, optional
+        Threshold for hard sparsity - values below this are set to exactly zero.
+        Applied to final solution. Default: 0 (no thresholding)
+    **solver_kwargs
+        Additional keyword arguments passed to specific solver
 
     Returns
     -------
     t_est : ndarray of shape (N,)
-        Estimated transmit power field (linear scale)
-        Sparse: most entries are zero or near-zero
+        Estimated transmit powers (linear scale)
     info : dict
-        Solver information including:
-        - 'solver_used': which solver was used
-        - 'objective_value': final objective value
-        - 'n_nonzero': number of non-zero entries in solution
-        - 'sparsity': fraction of zero entries
+        Solver information:
+        - 'solver_used': str, name of solver used
+        - 'objective_value': float, final objective value
+        - 'n_nonzero': int, number of non-zero transmit powers
+        - 'sparsity': float, fraction of zero transmit powers
         - 'success': whether optimization succeeded
 
     Examples
@@ -122,12 +124,22 @@ def solve_sparse_reconstruction(A_model, W, observed_powers, lambda_reg,
         solver = 'scipy'
 
     # Use scipy (L-BFGS-B)
-    t_est, info = solve_sparse_reconstruction_scipy(
-        A_model, W, observed_powers, lambda_reg, verbose=verbose, 
-        norm_exponent=norm_exponent, enable_reweighting=enable_reweighting,
-        max_reweight_iter=max_reweight_iter, reweight_epsilon=reweight_epsilon,
-        convergence_tol=convergence_tol, **solver_kwargs
-    )
+    if solver == 'scipy':
+        t_est, info = solve_sparse_reconstruction_scipy(
+            A_model, W, observed_powers, lambda_reg,
+            verbose=verbose,
+            norm_exponent=norm_exponent,
+            enable_reweighting=enable_reweighting,
+            max_reweight_iter=max_reweight_iter,
+            reweight_epsilon=reweight_epsilon,
+            convergence_tol=convergence_tol,
+            sparsity_threshold=sparsity_threshold,
+            **solver_kwargs
+        )
+    else:
+        raise ValueError(f"Unknown solver '{solver}'. Supported: 'scipy'")
+
+
     return t_est, info
 
 
@@ -152,7 +164,8 @@ def solve_sparse_reconstruction_scipy(A_model, W, observed_powers, lambda_reg,
                                        verbose=True, max_iter=1000, epsilon=1e-20, 
                                        norm_exponent=4, enable_reweighting=False,
                                        max_reweight_iter=5, reweight_epsilon=1e-6,
-                                       convergence_tol=1e-4, **scipy_kwargs):
+                                       convergence_tol=1e-4, sparsity_threshold=0,
+                                       **scipy_kwargs):
     """
     Solve sparse reconstruction using scipy.optimize (L-BFGS-B) with log-domain objective.
 
@@ -173,28 +186,38 @@ def solve_sparse_reconstruction_scipy(A_model, W, observed_powers, lambda_reg,
     verbose : bool, optional
         Print solver information, default: True
     max_iter : int, optional
-        Maximum iterations, default: 1000
+        Maximum L-BFGS iterations, default: 1000
     epsilon : float, optional
-        Small constant for numerical stability in log, default: 1e-20
+        Small constant to avoid log(0), default: 1e-20
     norm_exponent : float, optional
-        Exponent applied to column norms for L1 penalty weighting, default: 4
+        Exponent for sensitivity weighting. Default: 4
     enable_reweighting : bool, optional
-        If True, use iterative reweighting to better approximate L0-norm, default: False
+        Enable iterative reweighting for enhanced sparsity. Default: False
     max_reweight_iter : int, optional
-        Maximum number of reweighting iterations, default: 5
+        Maximum number of reweighting iterations. Default: 5
     reweight_epsilon : float, optional
-        Damping factor for sparsity weights to prevent division by zero, default: 1e-6
+        Damping factor for reweighting. Default: 1e-6
     convergence_tol : float, optional
-        Relative change threshold for early stopping, default: 1e-4
-    **scipy_kwargs : dict
-        Additional arguments passed to scipy.optimize.minimize
+        Relative change threshold for convergence. Default: 1e-4
+    sparsity_threshold : float, optional
+        Threshold for hard sparsity - values below this are set to exactly zero.
+        Applied to final solution. Default: 0 (no thresholding)
+    **scipy_kwargs
+        Additional arguments for scipy.optimize.minimize
 
     Returns
     -------
     t_est : ndarray of shape (N,)
-        Estimated transmit power field
+        Estimated transmit powers (linear scale)
     info : dict
-        Solver information
+        Solver information including:
+        - 'solver_used': 'scipy_log_domain'
+        - 'objective_value': final objective value
+        - 'n_nonzero': number of non-zero entries
+        - 'sparsity': fraction of zero entries
+        - 'success': whether optimization succeeded
+        - 'n_iter': number of optimizer iterations
+        - 'reweighting_enabled': whether reweighting was used
     """
     from scipy.optimize import minimize
 
@@ -376,6 +399,16 @@ def solve_sparse_reconstruction_scipy(A_model, W, observed_powers, lambda_reg,
             break
 
 
+    # Apply hard sparsity threshold if specified
+    if sparsity_threshold > 0:
+        n_before = np.sum(np.abs(t_est) > 1e-11)
+        t_est[np.abs(t_est) < sparsity_threshold] = 0
+        n_after = np.sum(np.abs(t_est) > 1e-11)
+        if verbose and n_before != n_after:
+            print(f"\nHard thresholding at {sparsity_threshold:.2e}:")
+            print(f"  Eliminated {n_before - n_after} weak transmitters")
+            print(f"  Remaining: {n_after}")
+    
     # Compute statistics
     n_nonzero = np.sum(np.abs(t_est) > 1e-11) # Threshold slightly above floor
     sparsity = 1.0 - n_nonzero / N
