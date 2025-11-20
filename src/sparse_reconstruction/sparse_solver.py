@@ -259,7 +259,7 @@ def solve_sparse_reconstruction_scipy(A_model, W, observed_powers, lambda_reg,
 
     # Initial guess
     # Use a small positive value to avoid log(0) issues at start
-    t0 = np.zeros(N) + 1e-20 # Start slightly away from zero (-200 dBm)
+    t0 = np.zeros(N) + 1e-8 # Start slightly away from zero (-80 dBm)
 
     # Box constraints: t ≥ 0
     bounds = [(0, None) for _ in range(N)]
