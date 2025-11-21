@@ -88,14 +88,16 @@ def run_hyperparam_sweep(test_mode=False):
     else:
         # Full grid as defined in implementation plan
         param_grid = {
-            'lambda_reg': [1e8, 2e8],
+            'lambda_reg': [0],
             'gamma': [0],
             'exclusion_radius': [0],
             'max_l2_norm': [1e-7],
-            'proximity_weight': [0.0, 500.0],
+            'proximity_weight': [0.0],
             'norm_exponent': [0.001, 0.01, 0.1, 0.5],
+            'penalty_type': ['l1', 'log_sum'],
             'whitening_method': ['covariance', 'diagonal_observation'],
-            'enable_reweighting': [False, True]
+            'enable_reweighting': [False, True],
+            'solver': ['glrt']
         }
     
     # Generate all combinations
@@ -138,11 +140,12 @@ def run_hyperparam_sweep(test_mode=False):
                 gamma=params['gamma'],
                 max_l2_norm=params['max_l2_norm'],
                 norm_exponent=params['norm_exponent'],
+                penalty_type=params['penalty_type'],
                 whitening_method=params['whitening_method'],
                 exclusion_radius=params['exclusion_radius'],
                 proximity_weight=params['proximity_weight'],
                 enable_reweighting=params['enable_reweighting'],
-                solver='scipy',
+                solver=params['solver'],
                 return_linear_scale=False, # Return dBm for plotting
                 verbose=False, # Reduce output
                 **reweight_kwargs
@@ -161,6 +164,7 @@ def run_hyperparam_sweep(test_mode=False):
                 f"P{int(params['proximity_weight'])}_"
                 f"M{params['max_l2_norm']:.0e}_"
                 f"N{params['norm_exponent']}_"
+                f"PT{params['penalty_type']}_"
                 f"W{w_short}_"
                 f"RW{rw_short}.png"
             )
