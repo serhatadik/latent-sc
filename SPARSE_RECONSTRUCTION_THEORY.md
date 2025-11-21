@@ -288,8 +288,24 @@ The $\ell_1$ penalty $\lambda \|\mathbf{t}\|_{1}$ induces sparsity through:
 3. **Statistical Interpretation:**
    - $\ell_1$ penalty corresponds to Laplace prior on $\mathbf{t}$
    - Bayesian MAP estimate with sparsity-inducing prior
-
-### Iterative Reweighting (L0 Approximation)
+ 
+ ### Non-Convex Penalties
+ 
+ To encourage sharper, sparser solutions and reduce the "smoothing" effect of the $\ell_1$ norm, we support direct optimization of non-convex sparsity penalties that better approximate the $\ell_0$ norm.
+ 
+ 1. **Log-Sum Penalty:**
+    $$R(\mathbf{t}) = \lambda \sum_{i=1}^{N} \log(t_i + \epsilon)$$
+    - Strongly penalizes small non-zero values, driving them to zero.
+    - Gradient: $\nabla_i R = \frac{\lambda}{t_i + \epsilon}$
+ 
+ 2. **Lp-norm Penalty ($0 < p < 1$):**
+    $$R(\mathbf{t}) = \lambda \sum_{i=1}^{N} (t_i + \epsilon)^p$$
+    - Similar to Log-Sum but with tunable aggressiveness via $p$.
+    - Gradient: $\nabla_i R = \lambda p (t_i + \epsilon)^{p-1}$
+ 
+ These penalties make the objective function even more non-convex, increasing the risk of local minima, but often yield superior sparsity when initialized well (e.g., via reweighting or careful warm-starting).
+ 
+ ### Iterative Reweighting (L0 Approximation)
 
 While $\ell_1$ minimization promotes sparsity, it is a convex relaxation of the ideal $\ell_0$ minimization (minimizing the count of non-zero elements). To better approximate the $\ell_0$ norm and enhance sparsity, we implement **Iterative Reweighted $\ell_1$ Minimization**.
 
@@ -312,7 +328,10 @@ The $\ell_1$ norm penalizes large coefficients more than the $\ell_0$ norm (whic
    Solve the weighted problem:
    $$\mathbf{t}^{(k)} = \arg\min_{\mathbf{t}\ge 0} \|\mathbf{W}(\log_{10}(\mathbf{A}\mathbf{t} + \epsilon) - \log_{10}(\mathbf{p} + \epsilon))\|_{2}^{2} + \lambda \sum_{i} w_{i}^{(k)} |t_{i}|$$
 
-4. **Termination:**
+4. **Exclusion Enforcement:**
+   Explicitly set $t_i^{(k)} = 0$ for all $i \in \mathcal{E}$ (exclusion zone). This ensures that in the next iteration, the weight $w_i^{(k+1)} \approx 1/\epsilon_{\text{rw}}$ becomes maximal, effectively forcing the solver to focus on valid regions.
+
+5. **Termination:**
    Repeat until convergence (relative change in $\mathbf{t}$ is small) or maximum iterations reached (typically 5-10).
 
 **Result:**
@@ -371,7 +390,58 @@ def solve_sparse_reconstruction(A, W, p, lambda_reg, solver='auto'):
 
 ---
 
-## 6. Implementation
+## 6. Sequential "Add-One" Detection (GLRT)
+
+### Motivation
+
+The joint optimization approach described above can sometimes converge to "trivial solutions" where transmitters are placed directly on top of sensors. This happens because the propagation matrix $\mathbf{A}$ has singularities at sensor locations (path gain $\to \infty$ as distance $\to 0$). The solver finds it "cheaper" to use a tiny amount of power right at the sensor to explain that specific sensor's reading, rather than finding a true distant source that explains multiple sensors coherently.
+
+To address this, we introduce an alternative paradigm based on **Sequential Detection** or **Greedy Pursuit**. Instead of asking "Where are all the transmitters?", we ask "Where is the single most likely transmitter that explains the current data?".
+
+### Algorithm
+
+This approach is based on the **Generalized Likelihood Ratio Test (GLRT)**.
+
+**Algorithm Steps:**
+
+1. **Initialize:**
+   - Residual $\mathbf{r} = \mathbf{p}$ (observed power)
+   - Support set $\mathcal{S} = \emptyset$
+   - Estimated power field $\mathbf{t} = \mathbf{0}$
+
+2. **Scan:**
+   For every grid point $i \notin \mathcal{S}$, calculate a GLRT score $T_i$. This scores how well a single transmitter at $i$ explains the current residual $\mathbf{r}$.
+
+   $$T_i = \frac{(\mathbf{a}_i^T \mathbf{W}^T \mathbf{W} \mathbf{r})^2}{\|\mathbf{W}\mathbf{a}_i\|_2^2}$$
+
+   where:
+   - $\mathbf{a}_i$ is the $i$-th column of the propagation matrix $\mathbf{A}$.
+   - $\mathbf{W}$ is the whitening matrix.
+   - $\mathbf{r}$ is the current residual vector.
+
+   *Interpretation:* This effectively tests the correlation between the whitened residual and the whitened propagation "template" for location $i$.
+
+3. **Select:**
+   Pick the location $i^*$ with the maximum score:
+   $$i^* = \arg\max_i T_i$$
+
+4. **Test:**
+   If $T_{i^*} < \gamma$ (threshold), stop.
+
+5. **Update:**
+   - Add $i^*$ to support set: $\mathcal{S} \leftarrow \mathcal{S} \cup \{i^*\}$
+   - **Re-optimize:** Solve for the powers of all found sources using the log-domain solver restricted to the support set $\mathcal{S}$.
+   - Update residual: $\mathbf{r} = \mathbf{p} - \mathbf{A}\mathbf{t}$
+
+6. **Repeat** from Step 2.
+
+### Why this works
+
+The trivial solution relies on a "conspiracy" of $M$ weak sources (one at each sensor) to explain the data. A greedy approach breaks this conspiracy because a single source at Sensor A does a terrible job of explaining the reading at Sensor B. The GLRT will prefer the true source because it explains multiple sensors simultaneously, yielding a higher global score than any single sensor-colocated source.
+
+---
+
+## 7. Implementation
 
 ### Complete Pipeline
 
