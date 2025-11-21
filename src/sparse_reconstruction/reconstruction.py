@@ -19,14 +19,17 @@ from .propagation_matrix import compute_propagation_matrix
 from .whitening import compute_whitening_matrix
 from .sparse_solver import solve_sparse_reconstruction
 from ..localization.likelihood import build_covariance_matrix
+from ..utils.coordinates import euclidean_distance
 
 
 def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape,
                                  scale=1.0, np_exponent=2, sigma=4.5, delta_c=400,
                                  lambda_reg=0.01, norm_exponent=4, solver='auto',
                                  whitening_method='covariance', gamma=0.0,
-                                 return_linear_scale=False, verbose=True,
-                                 **solver_kwargs):
+                                 max_l2_norm=None, exclusion_radius=50.0,
+                                 proximity_weight=50.0, proximity_decay=50.0,
+                                 return_linear_scale=False,
+                                 verbose=True, **solver_kwargs):
     """
     Perform joint sparse reconstruction to estimate transmit power field.
 
@@ -65,6 +68,23 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
     gamma : float, optional
         Coefficient for negative L2 regularization term: -gamma * ||t||_2^2
         This encourages larger transmit power values, default: 0.0 (disabled)
+    max_l2_norm : float, optional
+        Maximum L2 norm constraint: ||t||_2 ≤ max_l2_norm
+        When set, solver automatically switches to 'trust-constr'. Default: None (no constraint)
+    exclusion_radius : float, optional
+        Radius in meters around each sensor where transmit power is forced to zero.
+        Prevents trivial solutions where transmitters are placed on top of sensors.
+    exclusion_radius : float, optional
+        Radius in meters around each sensor where transmit power is forced to zero.
+        Prevents trivial solutions where transmitters are placed on top of sensors.
+        Default: 50.0 meters. Set to 0 to disable.
+    proximity_weight : float, optional
+        Strength of soft penalty for transmitters near sensors.
+        Penalty weight = 1 + proximity_weight * exp(-dist^2 / (2*decay^2))
+        Default: 0.0 (disabled)
+    proximity_decay : float, optional
+        Distance scale (meters) for proximity penalty decay.
+        Default: 50.0 meters
     return_linear_scale : bool, optional
         Return power field in linear scale (mW), default: False (return dBm)
     verbose : bool, optional
@@ -86,37 +106,6 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
         - 'peak_power': power at peak location
         - 'A_model': propagation matrix (if verbose=True)
         - 'W': whitening matrix (if verbose=True)
-
-    Examples
-    --------
-    >>> # Setup
-    >>> sensors = np.array([[10, 20], [30, 40], [50, 60]])
-    >>> observed_dBm = np.array([-80, -85, -90])
-    >>> map_shape = (100, 100)
-    >>>
-    >>> # Reconstruct
-    >>> tx_map, info = joint_sparse_reconstruction(
-    ...     sensors, observed_dBm, map_shape,
-    ...     scale=5.0, lambda_reg=0.01, verbose=False
-    ... )
-    >>> tx_map.shape
-    (100, 100)
-    >>> info['n_nonzero'] < 10000  # Should be sparse
-    True
-
-    Notes
-    -----
-    Regularization Parameter Selection:
-    - Start with λ ≈ 0.01 * ‖observed_powers‖
-    - If solution is too dense (many non-zeros), increase λ
-    - If solution is too sparse (all zeros), decrease λ
-    - Typical range: 10^-4 to 10^-1
-
-    Computational Complexity:
-    - Propagation matrix: O(M·N)
-    - Whitening matrix: O(M³)
-    - Sparse solver: O(iterations × M·N)
-    - Total: typically 10-60 seconds for 100×100 grid with 10 sensors
     """
     if verbose:
         print("\n" + "="*70)
@@ -134,6 +123,10 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
         print(f"  Scale: {scale} m/pixel")
         print(f"  Path loss exponent: n_p = {np_exponent}")
         print(f"  Sparsity parameter: λ = {lambda_reg:.4e}")
+        print(f"  Sparsity parameter: λ = {lambda_reg:.4e}")
+        print(f"  Exclusion radius: {exclusion_radius} m")
+        if proximity_weight > 0:
+            print(f"  Proximity penalty: weight={proximity_weight}, decay={proximity_decay} m")
 
     # Step 1: Convert observed powers from dBm to linear scale (mW)
     if verbose:
@@ -182,13 +175,96 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
         np_exponent=np_exponent, vectorized=True, verbose=verbose
     )
 
-    # Step 5: Solve sparse reconstruction
+    # Step 4.5: Compute exclusion mask
+    exclusion_mask = None
+    if exclusion_radius > 0:
+        if verbose:
+            print(f"\nStep 4.5: Computing exclusion mask (radius={exclusion_radius}m)...")
+        
+        exclusion_mask = np.zeros(N, dtype=bool)
+        radius_pixels = exclusion_radius / scale
+        radius_pixels_sq = radius_pixels ** 2
+        
+        # For each sensor, mask out nearby pixels
+        for sensor in sensor_locations:
+            sc, sr = sensor # sensor is (col, row)
+            
+            # Bounding box
+            c_min = max(0, int(np.floor(sc - radius_pixels)))
+            c_max = min(width, int(np.ceil(sc + radius_pixels)) + 1)
+            r_min = max(0, int(np.floor(sr - radius_pixels)))
+            r_max = min(height, int(np.ceil(sr + radius_pixels)) + 1)
+            
+            # Clip to map boundaries
+            c_min = max(0, c_min)
+            c_max = min(width, c_max)
+            r_min = max(0, r_min)
+            r_max = min(height, r_max)
+            
+            for r in range(r_min, r_max):
+                for c in range(c_min, c_max):
+                    # Check distance squared
+                    dist_sq = (c - sc)**2 + (r - sr)**2
+                    if dist_sq <= radius_pixels_sq:
+                        idx = r * width + c
+                        exclusion_mask[idx] = True
+        
+        if verbose:
+            n_excluded = np.sum(exclusion_mask)
+            print(f"  Excluded {n_excluded} grid points ({n_excluded/N*100:.2f}%)")
+
+            print(f"  Excluded {n_excluded} grid points ({n_excluded/N*100:.2f}%)")
+            
+    # Step 4.6: Compute proximity weights (soft penalty)
+    spatial_weights = None
+    if proximity_weight > 0:
+        if verbose:
+            print(f"\nStep 4.6: Computing proximity weights (weight={proximity_weight}, decay={proximity_decay}m)...")
+        
+        spatial_weights = np.ones(N)
+        decay_pixels = proximity_decay / scale
+        decay_pixels_sq = decay_pixels ** 2
+        
+        # Grid coordinates
+        grid_rows, grid_cols = np.indices((height, width))
+        grid_points = np.column_stack((grid_cols.ravel(), grid_rows.ravel()))
+        
+        # For each grid point, find distance to nearest sensor
+        # This can be slow for large grids. Use KDTree or simple broadcasting if M is small.
+        # Since M is usually small (<100), broadcasting is fine.
+        
+        # sensor_locations: (M, 2)
+        # grid_points: (N, 2)
+        
+        # Compute min distance squared to any sensor for all grid points
+        # We can do this efficiently by iterating over sensors and taking min
+        min_dist_sq = np.full(N, np.inf)
+        
+        for sensor in sensor_locations:
+            # sensor is (col, row)
+            sc, sr = sensor
+            # Squared distance from this sensor to all grid points
+            # (x - sc)^2 + (y - sr)^2
+            d_sq = (grid_points[:, 0] - sc)**2 + (grid_points[:, 1] - sr)**2
+            min_dist_sq = np.minimum(min_dist_sq, d_sq)
+            
+        # Compute weights: w = 1 + alpha * exp(-d^2 / (2*sigma^2))
+        # sigma = decay_pixels
+        # d^2 / (2*sigma^2) = min_dist_sq / (2 * decay_pixels_sq)
+        
+        gaussian_term = np.exp(-min_dist_sq / (2 * decay_pixels_sq))
+        spatial_weights = 1.0 + proximity_weight * gaussian_term
+        
+        if verbose:
+            print(f"  Spatial weights range: [{spatial_weights.min():.2f}, {spatial_weights.max():.2f}]")
     if verbose:
         print(f"\nStep 5: Solving sparse reconstruction...")
 
     t_est, solver_info = solve_sparse_reconstruction(
         A_model, W, observed_powers_linear, lambda_reg,
         solver=solver, norm_exponent=norm_exponent, gamma=gamma,
+        max_l2_norm=max_l2_norm, exclusion_mask=exclusion_mask,
+        spatial_weights=spatial_weights,
         verbose=verbose, **solver_kwargs
     )
 
@@ -354,7 +430,7 @@ def compute_signal_strength_at_points(transmit_power_map_linear, target_location
     True
     """
     from .propagation_matrix import compute_linear_path_gain
-    from ..utils.coordinates import euclidean_distance
+    # euclidean_distance is now imported at top level
 
     height, width = transmit_power_map_linear.shape
     K = len(target_locations)
