@@ -26,7 +26,7 @@ def solve_sparse_reconstruction(A_model, W, observed_powers, lambda_reg,
                                  solver='scipy', verbose=True, norm_exponent=4,
                                  enable_reweighting=False, max_reweight_iter=5,
                                  reweight_epsilon=1e-6, convergence_tol=1e-4,
-                                 sparsity_threshold=0,
+                                 sparsity_threshold=0, gamma=0.0,
                                  **solver_kwargs):
     """
     Solve sparse reconstruction problem with automatic solver selection.
@@ -70,6 +70,9 @@ def solve_sparse_reconstruction(A_model, W, observed_powers, lambda_reg,
     sparsity_threshold : float, optional
         Threshold for hard sparsity - values below this are set to exactly zero.
         Applied to final solution. Default: 0 (no thresholding)
+    gamma : float, optional
+        Coefficient for negative L2 regularization term: -gamma * ||t||_2^2
+        This encourages larger transmit power values. Default: 0.0 (disabled)
     **solver_kwargs
         Additional keyword arguments passed to specific solver
 
@@ -134,6 +137,7 @@ def solve_sparse_reconstruction(A_model, W, observed_powers, lambda_reg,
             reweight_epsilon=reweight_epsilon,
             convergence_tol=convergence_tol,
             sparsity_threshold=sparsity_threshold,
+            gamma=gamma,
             **solver_kwargs
         )
     else:
@@ -165,7 +169,7 @@ def solve_sparse_reconstruction_scipy(A_model, W, observed_powers, lambda_reg,
                                        norm_exponent=4, enable_reweighting=False,
                                        max_reweight_iter=5, reweight_epsilon=1e-6,
                                        convergence_tol=1e-4, sparsity_threshold=0,
-                                       **scipy_kwargs):
+                                       gamma=0.0, **scipy_kwargs):
     """
     Solve sparse reconstruction using scipy.optimize (L-BFGS-B) with log-domain objective.
 
@@ -202,6 +206,9 @@ def solve_sparse_reconstruction_scipy(A_model, W, observed_powers, lambda_reg,
     sparsity_threshold : float, optional
         Threshold for hard sparsity - values below this are set to exactly zero.
         Applied to final solution. Default: 0 (no thresholding)
+    gamma : float, optional
+        Coefficient for negative L2 regularization term: -gamma * ||t||_2^2
+        This encourages larger transmit power values. Default: 0.0 (disabled)
     **scipy_kwargs
         Additional arguments for scipy.optimize.minimize
 
@@ -295,7 +302,7 @@ def solve_sparse_reconstruction_scipy(A_model, W, observed_powers, lambda_reg,
 
         def objective(t):
             """
-            Objective function: ‖W(log10(A·t + ε) - log10(p + ε))‖₂² + ‖diag(λ)·t‖₁
+            Objective function: ‖W(log10(A·t + ε) - log10(p + ε))‖₂² + ‖diag(λ)·t‖₁ - γ‖t‖₂²
             """
             # 1. Compute A·t
             At = A_model @ t
@@ -317,8 +324,11 @@ def solve_sparse_reconstruction_scipy(A_model, W, observed_powers, lambda_reg,
             # 6. Regularization term: Weighted L1 norm
             # lambda_vec already includes the weights
             regularization_term = np.sum(lambda_vec * np.abs(t))
+            
+            # 7. Negative L2 regularization: -γ‖t‖₂²
+            negative_l2_term = -gamma * np.sum(t**2)
                 
-            return data_term + regularization_term
+            return data_term + regularization_term + negative_l2_term
 
         def gradient(t):
             """
@@ -347,8 +357,11 @@ def solve_sparse_reconstruction_scipy(A_model, W, observed_powers, lambda_reg,
             # Regularization gradient
             # Gradient of sum(lambda_vec * |t|) is lambda_vec * sign(t)
             grad_reg = lambda_vec * np.sign(t)
+            
+            # Negative L2 gradient: d/dt(-γ‖t‖₂²) = -2γt
+            grad_negative_l2 = -2 * gamma * t
                 
-            return grad_data + grad_reg
+            return grad_data + grad_reg + grad_negative_l2
 
         # Initial guess
         # Use a small positive value to avoid log(0) issues at start

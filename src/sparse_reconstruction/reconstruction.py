@@ -24,6 +24,7 @@ from ..localization.likelihood import build_covariance_matrix
 def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape,
                                  scale=1.0, np_exponent=2, sigma=4.5, delta_c=400,
                                  lambda_reg=0.01, norm_exponent=4, solver='auto',
+                                 whitening_method='covariance', gamma=0.0,
                                  return_linear_scale=False, verbose=True,
                                  **solver_kwargs):
     """
@@ -57,6 +58,13 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
         Higher values increase emphasis on path gain differences
     solver : {'auto', 'cvxpy', 'sklearn', 'scipy'}, optional
         Optimization solver, default: 'auto'
+    whitening_method : {'covariance', 'diagonal_observation'}, optional
+        Method for computing whitening matrix, default: 'covariance'
+        - 'covariance': Use covariance-based whitening W = V^(-1/2) (standard approach)
+        - 'diagonal_observation': Use diagonal matrix W_jj = log10(1/p_j) based on observed powers
+    gamma : float, optional
+        Coefficient for negative L2 regularization term: -gamma * ||t||_2^2
+        This encourages larger transmit power values, default: 0.0 (disabled)
     return_linear_scale : bool, optional
         Return power field in linear scale (mW), default: False (return dBm)
     verbose : bool, optional
@@ -150,8 +158,20 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
     # Step 3: Compute whitening matrix
     if verbose:
         print(f"\nStep 3: Computing whitening matrix...")
+        print(f"  Method: {whitening_method}")
 
-    W = compute_whitening_matrix(cov_matrix, method='cholesky', verbose=verbose)
+    if whitening_method == 'covariance':
+        W = compute_whitening_matrix(cov_matrix, method='cholesky', verbose=verbose)
+    elif whitening_method == 'diagonal_observation':
+        W = compute_whitening_matrix(
+            cov_matrix, method='diagonal_observation',
+            observed_powers=observed_powers_linear, verbose=verbose
+        )
+    else:
+        raise ValueError(
+            f"Unknown whitening_method '{whitening_method}'. "
+            "Choose 'covariance' or 'diagonal_observation'"
+        )
 
     # Step 4: Build propagation matrix
     if verbose:
@@ -168,7 +188,8 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
 
     t_est, solver_info = solve_sparse_reconstruction(
         A_model, W, observed_powers_linear, lambda_reg,
-        solver=solver, norm_exponent=norm_exponent, verbose=verbose, **solver_kwargs
+        solver=solver, norm_exponent=norm_exponent, gamma=gamma,
+        verbose=verbose, **solver_kwargs
     )
 
     # Step 6: Reshape to map

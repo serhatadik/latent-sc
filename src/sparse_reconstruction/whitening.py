@@ -23,7 +23,7 @@ import warnings
 
 
 def compute_whitening_matrix(cov_matrix, method='cholesky', regularization=1e-10,
-                              verbose=True):
+                              verbose=True, observed_powers=None):
     """
     Compute whitening matrix W = V^(-1/2) from covariance matrix.
 
@@ -31,15 +31,19 @@ def compute_whitening_matrix(cov_matrix, method='cholesky', regularization=1e-10
     ----------
     cov_matrix : ndarray of shape (M, M)
         Covariance matrix (must be symmetric positive definite)
-    method : {'cholesky', 'svd', 'eig'}, optional
+    method : {'cholesky', 'svd', 'eig', 'diagonal_observation'}, optional
         Method for computing matrix square root, default: 'cholesky'
         - 'cholesky': Fast, requires positive definite matrix
         - 'svd': More robust, handles near-singular matrices
         - 'eig': Eigenvalue decomposition, middle ground
+        - 'diagonal_observation': Diagonal matrix based on observed powers
     regularization : float, optional
         Small value added to diagonal for numerical stability, default: 1e-10
     verbose : bool, optional
         Print diagnostic information, default: True
+    observed_powers : ndarray of shape (M,), optional
+        Observed sensor powers (linear scale, mW). Required for method='diagonal_observation'.
+        When provided, diagonal whitening matrix W_jj = log10(1 / observed_powers_j) is computed.
 
     Returns
     -------
@@ -102,11 +106,15 @@ def compute_whitening_matrix(cov_matrix, method='cholesky', regularization=1e-10
         W = _whitening_svd(cov_matrix, verbose)
     elif method == 'eig':
         W = _whitening_eig(cov_matrix, verbose)
+    elif method == 'diagonal_observation':
+        if observed_powers is None:
+            raise ValueError("observed_powers must be provided for method='diagonal_observation'")
+        W = _whitening_diagonal_observation(observed_powers, M, verbose)
     else:
-        raise ValueError(f"Unknown method: {method}. Choose 'cholesky', 'svd', or 'eig'")
+        raise ValueError(f"Unknown method: {method}. Choose 'cholesky', 'svd', 'eig', or 'diagonal_observation'")
 
-    # Validate result
-    if verbose:
+    # Validate result (skip validation for diagonal_observation as it doesn't use covariance)
+    if verbose and method != 'diagonal_observation':
         whitened_cov = W @ cov_matrix @ W.T
         error = np.linalg.norm(whitened_cov - np.eye(M), 'fro') / M
         print(f"  Whitening error: ‖W·V·W^T - I‖_F / M = {error:.2e}")
@@ -200,6 +208,50 @@ def _whitening_eig(cov_matrix, verbose=True):
         print(f"  Eigenvalue decomposition: {len(eigvals)} eigenvalues")
         print(f"  Condition number: {eigvals[-1] / eigvals[0]:.2e}")
 
+    return W
+
+
+def _whitening_diagonal_observation(observed_powers, M, verbose=True):
+    """
+    Compute diagonal whitening matrix based on observed sensor powers.
+
+    W_jj = log10(1 / p_j) = -log10(p_j)
+
+    This weights sensors inversely proportional to their observed power in log domain.
+    Sensors with weaker signals (smaller p_j) get larger weights.
+
+    Parameters
+    ----------
+    observed_powers : ndarray of shape (M,)
+        Observed sensor powers in linear scale (mW)
+    M : int
+        Number of sensors
+    verbose : bool, optional
+        Print diagnostic information, default: True
+
+    Returns
+    -------
+    W : ndarray of shape (M, M)
+        Diagonal whitening matrix
+    """
+    if observed_powers.shape != (M,):
+        raise ValueError(f"observed_powers shape {observed_powers.shape} must be ({M},)")
+    
+    if np.any(observed_powers <= 0):
+        raise ValueError("All observed powers must be positive for diagonal_observation method")
+    
+    # Compute diagonal elements: W_jj = log10(1/p_j) = -log10(p_j)
+    diagonal_elements = np.log10(1.0 / observed_powers)
+    
+    # Create diagonal matrix
+    W = np.diag(diagonal_elements)
+    
+    if verbose:
+        print(f"  Diagonal observation whitening:")
+        print(f"    Observed power range: [{observed_powers.min():.2e}, {observed_powers.max():.2e}] mW")
+        print(f"    Diagonal range: [{diagonal_elements.min():.2f}, {diagonal_elements.max():.2f}]")
+        print(f"    Mean diagonal: {diagonal_elements.mean():.2f}")
+    
     return W
 
 
