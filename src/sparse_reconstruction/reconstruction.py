@@ -28,6 +28,7 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
                                  whitening_method='covariance', gamma=0.0,
                                  max_l2_norm=None, exclusion_radius=50.0,
                                  proximity_weight=50.0, proximity_decay=50.0,
+                                 penalty_type='l1', penalty_param=0.5, sparsity_epsilon=1e-6,
                                  return_linear_scale=False,
                                  verbose=True, **solver_kwargs):
     """
@@ -74,9 +75,6 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
     exclusion_radius : float, optional
         Radius in meters around each sensor where transmit power is forced to zero.
         Prevents trivial solutions where transmitters are placed on top of sensors.
-    exclusion_radius : float, optional
-        Radius in meters around each sensor where transmit power is forced to zero.
-        Prevents trivial solutions where transmitters are placed on top of sensors.
         Default: 50.0 meters. Set to 0 to disable.
     proximity_weight : float, optional
         Strength of soft penalty for transmitters near sensors.
@@ -85,6 +83,12 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
     proximity_decay : float, optional
         Distance scale (meters) for proximity penalty decay.
         Default: 50.0 meters
+    penalty_type : {'l1', 'log_sum', 'lp'}, optional
+        Type of sparsity penalty. Default: 'l1'
+    penalty_param : float, optional
+        Parameter for 'lp' penalty (p value). Default: 0.5
+    sparsity_epsilon : float, optional
+        Small constant for 'log_sum' and 'lp' penalties. Default: 1e-6
     return_linear_scale : bool, optional
         Return power field in linear scale (mW), default: False (return dBm)
     verbose : bool, optional
@@ -123,10 +127,10 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
         print(f"  Scale: {scale} m/pixel")
         print(f"  Path loss exponent: n_p = {np_exponent}")
         print(f"  Sparsity parameter: λ = {lambda_reg:.4e}")
-        print(f"  Sparsity parameter: λ = {lambda_reg:.4e}")
         print(f"  Exclusion radius: {exclusion_radius} m")
         if proximity_weight > 0:
             print(f"  Proximity penalty: weight={proximity_weight}, decay={proximity_decay} m")
+        print(f"  Penalty type: {penalty_type}")
 
     # Step 1: Convert observed powers from dBm to linear scale (mW)
     if verbose:
@@ -212,8 +216,6 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
         if verbose:
             n_excluded = np.sum(exclusion_mask)
             print(f"  Excluded {n_excluded} grid points ({n_excluded/N*100:.2f}%)")
-
-            print(f"  Excluded {n_excluded} grid points ({n_excluded/N*100:.2f}%)")
             
     # Step 4.6: Compute proximity weights (soft penalty)
     spatial_weights = None
@@ -260,13 +262,32 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
     if verbose:
         print(f"\nStep 5: Solving sparse reconstruction...")
 
-    t_est, solver_info = solve_sparse_reconstruction(
-        A_model, W, observed_powers_linear, lambda_reg,
-        solver=solver, norm_exponent=norm_exponent, gamma=gamma,
-        max_l2_norm=max_l2_norm, exclusion_mask=exclusion_mask,
-        spatial_weights=spatial_weights,
-        verbose=verbose, **solver_kwargs
-    )
+    if solver == 'glrt':
+        from .glrt_solver import solve_iterative_glrt
+        t_est, solver_info = solve_iterative_glrt(
+            A_model, W, observed_powers_linear,
+            verbose=verbose,
+            lambda_reg=lambda_reg,
+            norm_exponent=norm_exponent,
+            gamma=gamma,
+            max_l2_norm=max_l2_norm,
+            exclusion_mask=exclusion_mask,
+            spatial_weights=spatial_weights,
+            penalty_type=penalty_type,
+            penalty_param=penalty_param,
+            sparsity_epsilon=sparsity_epsilon,
+            **solver_kwargs
+        )
+    else:
+        t_est, solver_info = solve_sparse_reconstruction(
+            A_model, W, observed_powers_linear, lambda_reg,
+            solver=solver, norm_exponent=norm_exponent, gamma=gamma,
+            max_l2_norm=max_l2_norm, exclusion_mask=exclusion_mask,
+            spatial_weights=spatial_weights,
+            penalty_type=penalty_type, penalty_param=penalty_param,
+            sparsity_epsilon=sparsity_epsilon,
+            verbose=verbose, **solver_kwargs
+        )
 
     # Step 6: Reshape to map
     transmit_power_map_linear = t_est.reshape(height, width)
