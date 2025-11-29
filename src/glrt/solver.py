@@ -85,7 +85,7 @@ def solve_glrt(observed_powers, A_model, cov_matrix, threshold,
     A_tilde_norms_sq = np.sum(A_tilde**2, axis=0)
     
     # Avoid division by zero for columns that are effectively zero (e.g. far away or masked)
-    valid_cols_mask = A_tilde_norms_sq > 1e-12
+    valid_cols_mask = A_tilde_norms_sq > 1e-20
     
     iteration = 0
     scores_history = []
@@ -100,7 +100,7 @@ def solve_glrt(observed_powers, A_model, cov_matrix, threshold,
         # sigma_hat^2 = (1/M) * ||r_tilde||^2
         sigma_hat_sq = np.mean(r_tilde**2)
         
-        if sigma_hat_sq < 1e-15:
+        if sigma_hat_sq < 1e-20:
             if verbose:
                 print("Residual variance effectively zero. Stopping.")
             break
