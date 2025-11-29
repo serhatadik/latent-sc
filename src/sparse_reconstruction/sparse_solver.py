@@ -28,13 +28,20 @@ def solve_sparse_reconstruction(A_model, W, observed_powers, lambda_reg,
                                  reweight_epsilon=1e-12, reweight_epsilon_scale=1e-3,
                                  convergence_tol=1e-4,
                                  sparsity_threshold=0, gamma=0.0, max_l2_norm=None,
-                                 exclusion_mask=None, spatial_weights=None, **solver_kwargs):
+                                 exclusion_mask=None, spatial_weights=None,
+                                 penalty_type='l1', penalty_param=0.5, sparsity_epsilon=1e-6,
+                                 **solver_kwargs):
     """
     Solve sparse reconstruction problem with automatic solver selection.
 
     Solves:
-        min  ‖W(log10(A·t) - log10(p))‖₂² + λ‖t‖₁
+        min  ‖W(log10(A·t) - log10(p))‖₂² + R(t)
         t≥0
+    
+    where R(t) is the sparsity penalty:
+    - 'l1': λ‖t‖₁
+    - 'log_sum': λ∑log(t_i + ε)
+    - 'lp': λ∑(t_i + ε)^p
 
     Parameters
     ----------
@@ -87,6 +94,12 @@ def solve_sparse_reconstruction(A_model, W, observed_powers, lambda_reg,
     spatial_weights : ndarray of shape (N,), optional
         Additional spatial regularization weights.
         Multiplied with sensitivity weights. Default: None (ones)
+    penalty_type : {'l1', 'log_sum', 'lp'}, optional
+        Type of sparsity penalty. Default: 'l1'
+    penalty_param : float, optional
+        Parameter for 'lp' penalty (p value). Default: 0.5
+    sparsity_epsilon : float, optional
+        Small constant for 'log_sum' and 'lp' penalties. Default: 1e-6
     **solver_kwargs
         Additional keyword arguments passed to specific solver
 
@@ -125,6 +138,9 @@ def solve_sparse_reconstruction(A_model, W, observed_powers, lambda_reg,
             print(f"Sparsity parameter: lambda = [array of shape {lambda_reg.shape}]")
             print(f"  Mean lambda: {np.mean(lambda_reg):.2e}")
             print(f"  Max lambda: {np.max(lambda_reg):.2e}")
+        print(f"Penalty type: {penalty_type}")
+        if penalty_type == 'lp':
+            print(f"  p = {penalty_param}")
         if exclusion_mask is not None:
             n_excluded = np.sum(exclusion_mask)
             print(f"Exclusion zone: {n_excluded} grid points forced to zero ({n_excluded/A_model.shape[1]*100:.1f}%)")
@@ -158,6 +174,9 @@ def solve_sparse_reconstruction(A_model, W, observed_powers, lambda_reg,
             convergence_tol=convergence_tol,
             exclusion_mask=exclusion_mask,
             spatial_weights=spatial_weights,
+            penalty_type=penalty_type,
+            penalty_param=penalty_param,
+            sparsity_epsilon=sparsity_epsilon,
             **solver_kwargs
         )
     else:
@@ -191,12 +210,14 @@ def solve_sparse_reconstruction_scipy(A_model, W, observed_powers, lambda_reg,
                                        reweight_epsilon_scale=1e-3,
                                        convergence_tol=1e-4, sparsity_threshold=0,
                                        gamma=0.0, max_l2_norm=None, exclusion_mask=None, 
-                                       spatial_weights=None, **scipy_kwargs):
+                                       spatial_weights=None, 
+                                       penalty_type='l1', penalty_param=0.5, sparsity_epsilon=1e-6,
+                                       **scipy_kwargs):
     """
     Solve sparse reconstruction using scipy.optimize (L-BFGS-B) with log-domain objective.
 
     Objective:
-        min ‖W(log10(A·t + ε) - log10(p + ε))‖₂² + λ‖t‖₁
+        min ‖W(log10(A·t + ε) - log10(p + ε))‖₂² + R(t)
         t≥0
 
     Parameters
@@ -235,11 +256,17 @@ def solve_sparse_reconstruction_scipy(A_model, W, observed_powers, lambda_reg,
         This encourages larger transmit power values. Default: 0.0 (disabled)
     max_l2_norm : float, optional
         Maximum L2 norm constraint: ||t||_2 ≤ max_l2_norm
-        When set, automatically switches to 'trust-constr' solver. Default: None (no constraint)
+        When set, automatically switches to 'trust-constr'. Default: None (no constraint)
     exclusion_mask : ndarray of shape (N,), bool, optional
         Mask indicating grid points that must be zero (True = excluded/zero).
     spatial_weights : ndarray of shape (N,), optional
         Additional spatial regularization weights.
+    penalty_type : {'l1', 'log_sum', 'lp'}, optional
+        Type of sparsity penalty. Default: 'l1'
+    penalty_param : float, optional
+        Parameter for 'lp' penalty (p value). Default: 0.5
+    sparsity_epsilon : float, optional
+        Small constant for 'log_sum' and 'lp' penalties. Default: 1e-6
     **scipy_kwargs
         Additional arguments for scipy.optimize.minimize
 
@@ -248,14 +275,7 @@ def solve_sparse_reconstruction_scipy(A_model, W, observed_powers, lambda_reg,
     t_est : ndarray of shape (N,)
         Estimated transmit powers (linear scale)
     info : dict
-        Solver information including:
-        - 'solver_used': 'scipy_log_domain'
-        - 'objective_value': final objective value
-        - 'n_nonzero': number of non-zero entries
-        - 'sparsity': fraction of zero entries
-        - 'success': whether optimization succeeded
-        - 'n_iter': number of optimizer iterations
-        - 'reweighting_enabled': whether reweighting was used
+        Solver information
     """
     from scipy.optimize import minimize, NonlinearConstraint, BFGS
 
@@ -347,21 +367,7 @@ def solve_sparse_reconstruction_scipy(A_model, W, observed_powers, lambda_reg,
                 print(f"\nIteration {reweight_iter}: Refining sparsity")
                 print(f"  Adaptive epsilon: {current_epsilon:.2e} (max_t={max_t:.2e})")
                 print(f"  Previous nonzeros: {np.sum(np.abs(t_prev) > 1e-11)}")
-                print(f"  Raw weights min/max: {weights.min():.2e} / {weights.max():.2e}")
-            
-            # Normalize so that the minimum weight (for largest signal) is 1.0
-            # This ensures that the regularization on the signal is at least lambda_reg,
-            # while the regularization on noise/zeros is scaled up.
-            if weights.min() > 0:
-                weights = weights / weights.min()
-            elif weights.max() > 0:
-                weights = weights / weights.max()
-            
-            if verbose:
-                print(f"\nIteration {reweight_iter}: Refining sparsity")
-                print(f"  Adaptive epsilon: {current_epsilon:.2e} (max_t={max_t:.2e})")
-                print(f"  Previous nonzeros: {np.sum(np.abs(t_prev) > 1e-11)}")
-                print(f"  Weight range: [{weights.min():.2e}, {weights.max():.2e}]")
+                print(f"  Weight range: [{weights.min():.2e} / {weights.max():.2e}]")
 
         # Prepare regularization vector for this iteration
         if np.isscalar(lambda_reg):
@@ -373,7 +379,7 @@ def solve_sparse_reconstruction_scipy(A_model, W, observed_powers, lambda_reg,
 
         def objective(t):
             """
-            Objective function: ‖W(log10(A·t + ε) - log10(p + ε))‖₂² + ‖diag(λ)·t‖₁ - γ‖t‖₂² + barrier
+            Objective function: ‖W(log10(A·t + ε) - log10(p + ε))‖₂² + R(t) - γ‖t‖₂² + barrier
             """
             # 1. Compute A·t
             At = A_model @ t
@@ -392,9 +398,20 @@ def solve_sparse_reconstruction_scipy(A_model, W, observed_powers, lambda_reg,
             # 5. Data fidelity term: squared L2 norm
             data_term = np.sum(whitened_diff**2)
             
-            # 6. Regularization term: Weighted L1 norm
+            # 6. Regularization term: Weighted penalty
             # lambda_vec already includes the weights
-            regularization_term = np.sum(lambda_vec * np.abs(t))
+            if penalty_type == 'l1':
+                regularization_term = np.sum(lambda_vec * np.abs(t))
+            elif penalty_type == 'log_sum':
+                # sum lambda * log(t + eps)
+                # Use a separate epsilon for sparsity penalty to control sharpness
+                regularization_term = np.sum(lambda_vec * np.log(t + sparsity_epsilon))
+            elif penalty_type == 'lp':
+                # sum lambda * (t + eps)^p
+                regularization_term = np.sum(lambda_vec * (t + sparsity_epsilon)**penalty_param)
+            else:
+                # Fallback to L1
+                regularization_term = np.sum(lambda_vec * np.abs(t))
             
             # 7. Negative L2 regularization: -γ‖t‖₂² (with overflow protection)
             t_squared_sum = np.sum(t**2)
@@ -448,8 +465,17 @@ def solve_sparse_reconstruction_scipy(A_model, W, observed_powers, lambda_reg,
             grad_data = (2 / np.log(10)) * grad_data_part
             
             # Regularization gradient
-            # Gradient of sum(lambda_vec * |t|) is lambda_vec * sign(t)
-            grad_reg = lambda_vec * np.sign(t)
+            if penalty_type == 'l1':
+                # Gradient of sum(lambda_vec * |t|) is lambda_vec * sign(t)
+                grad_reg = lambda_vec * np.sign(t)
+            elif penalty_type == 'log_sum':
+                # Gradient of sum(lambda * log(t + eps)) is lambda / (t + eps)
+                grad_reg = lambda_vec / (t + sparsity_epsilon)
+            elif penalty_type == 'lp':
+                # Gradient of sum(lambda * (t + eps)^p) is lambda * p * (t + eps)^(p-1)
+                grad_reg = lambda_vec * penalty_param * (t + sparsity_epsilon)**(penalty_param - 1)
+            else:
+                grad_reg = lambda_vec * np.sign(t)
             
             # Negative L2 gradient: d/dt(-γ‖t‖₂²) = -2γt
             grad_negative_l2 = -2 * gamma * t
@@ -514,6 +540,10 @@ def solve_sparse_reconstruction_scipy(A_model, W, observed_powers, lambda_reg,
 
         t_est = result.x
         actual_iterations = reweight_iter
+        
+        # Explicitly zero out excluded regions (critical for reweighting logic)
+        if exclusion_mask is not None:
+            t_est[exclusion_mask] = 0.0
         
         # Check convergence (skip for iteration 0)
         if enable_reweighting and reweight_iter > 0 and t_prev is not None:

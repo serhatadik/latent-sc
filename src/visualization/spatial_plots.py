@@ -29,6 +29,8 @@ def plot_transmit_power_map(transmit_power_map, data_points, observed_powers,
     square markers. For dense reconstructions (>= 50 nonzero pixels), shows
     traditional heatmap visualization.
 
+    Values that appear more than 80% of the time are filtered out from the visualization.
+
     Parameters
     ----------
     transmit_power_map : np.ndarray
@@ -52,6 +54,20 @@ def plot_transmit_power_map(transmit_power_map, data_points, observed_powers,
     -------
     fig, ax : matplotlib figure and axis objects
     """
+    # Filter out values that appear more than 80% of the time
+    flat_map = transmit_power_map.flatten()
+    unique_values, counts = np.unique(flat_map, return_counts=True)
+    total_count = len(flat_map)
+    
+    # Find values that appear more than 80% of the time
+    dominant_value_mask = counts / total_count > 0.8
+    dominant_values = unique_values[dominant_value_mask]
+    
+    # Create a mask for values to visualize (excluding dominant values)
+    visualize_mask = np.ones_like(transmit_power_map, dtype=bool)
+    for dominant_val in dominant_values:
+        visualize_mask = visualize_mask & (transmit_power_map != dominant_val)
+    
     # Count nonzero pixels for sparse reconstruction detection
     # Handle dBm scale where "zero" is represented as a very small number (e.g., -200 dBm)
     # The linear_to_dbm function uses 1e-20 floor, which is -200 dBm
@@ -59,8 +75,11 @@ def plot_transmit_power_map(transmit_power_map, data_points, observed_powers,
         nonzero_mask = transmit_power_map > -190
     else:
         nonzero_mask = transmit_power_map != 0
-
-    n_nonzero = np.sum(nonzero_mask)
+    
+    # Combine both masks: must be nonzero AND not a dominant value
+    combined_mask = nonzero_mask & visualize_mask
+    
+    n_nonzero = np.sum(combined_mask)
     is_sparse = n_nonzero < 50
 
     x = np.linspace(0, transmit_power_map.shape[1], transmit_power_map.shape[1], endpoint=False)
@@ -70,42 +89,58 @@ def plot_transmit_power_map(transmit_power_map, data_points, observed_powers,
     fig = plt.figure(figsize=(13, 8))
     ax = fig.gca()
 
+    # Initialize colorbar variable
+    cbar = None
+
     if is_sparse:
         # Sparse reconstruction: show nonzero pixels as square markers
-        # Extract nonzero pixel coordinates and values
-        nonzero_indices = np.argwhere(nonzero_mask)
-        nonzero_y = nonzero_indices[:, 0]
-        nonzero_x = nonzero_indices[:, 1]
-        nonzero_values = transmit_power_map[nonzero_mask]
+        # Extract pixel coordinates and values (excluding dominant values)
+        if n_nonzero > 0:
+            nonzero_indices = np.argwhere(combined_mask)
+            nonzero_y = nonzero_indices[:, 0]
+            nonzero_x = nonzero_indices[:, 1]
+            nonzero_values = transmit_power_map[combined_mask]
 
-        # Set axis limits to show full map extent
-        ax.set_xlim([0, transmit_power_map.shape[1]])
-        ax.set_ylim([0, transmit_power_map.shape[0]])
+            # Set axis limits to show full map extent
+            ax.set_xlim([0, transmit_power_map.shape[1]])
+            ax.set_ylim([0, transmit_power_map.shape[0]])
 
-        # Plot nonzero pixels as square markers with colormap
-        sparse_scatter = plt.scatter(nonzero_x, nonzero_y,
-                                    c=nonzero_values, s=300, marker='s',
-                                    cmap='hot', edgecolor='black', linewidth=1,
-                                    label='Estimated TX Locations', zorder=5)
+            # Plot nonzero pixels as square markers with colormap
+            sparse_scatter = plt.scatter(nonzero_x, nonzero_y,
+                                        c=nonzero_values, s=300, marker='s',
+                                        cmap='viridis', edgecolor='black', linewidth=1,
+                                        label='Estimated TX Locations', zorder=5)
 
-        # Right colorbar for estimated transmit power
-        cbar = plt.colorbar(sparse_scatter, label='Estimated Transmit Power [dBX]')
-        cbar.ax.tick_params(labelsize=18)
-        cbar.set_label(label='Estimated Transmit Power [dBX]', size=18)
+            # Right colorbar for estimated transmit power
+            cbar = plt.colorbar(sparse_scatter, label='Estimated Transmit Power [dBX]')
+            cbar.ax.tick_params(labelsize=18)
+            cbar.set_label(label='Estimated Transmit Power [dBX]', size=18)
+        else:
+            # No pixels to display after filtering
+            ax.set_xlim([0, transmit_power_map.shape[1]])
+            ax.set_ylim([0, transmit_power_map.shape[0]])
     else:
         # Dense reconstruction: traditional heatmap
-        cf = plt.contourf(X, Y, transmit_power_map, 100, cmap='hot')
+        # Create a masked version for visualization
+        masked_map = np.ma.masked_where(~visualize_mask, transmit_power_map)
+        
+        if np.sum(visualize_mask) > 0:
+            cf = plt.contourf(X, Y, masked_map, 100, cmap='viridis')
 
-        # Right colorbar for estimated transmit power
-        cbar = plt.colorbar(cf, label='Estimated Transmit Power [dBX]')
-        cbar.ax.tick_params(labelsize=18)
-        cbar.set_label(label='Estimated Transmit Power [dBX]', size=18)
+            # Right colorbar for estimated transmit power
+            cbar = plt.colorbar(cf, label='Estimated Transmit Power [dBX]')
+            cbar.ax.tick_params(labelsize=18)
+            cbar.set_label(label='Estimated Transmit Power [dBX]', size=18)
+        else:
+            # No pixels to display after filtering
+            ax.set_xlim([0, transmit_power_map.shape[1]])
+            ax.set_ylim([0, transmit_power_map.shape[0]])
 
     # Scatter plot for observed data points
     scatter = plt.scatter(data_points[:, 0], data_points[:, 1],
-                         c=observed_powers, s=150, edgecolor='green',
-                         linewidth=2, cmap='hot', label='Spectrum Monitoring Locations',
-                         zorder=6)
+                         c=observed_powers, s=50, edgecolor='green',
+                         linewidth=1, cmap='hot', label='Spectrum Monitoring Locations',
+                         alpha=0.6, zorder=6)
 
     # Left colorbar for observed signal strength
     scatter_cbar = plt.colorbar(scatter, label='Observed Signal Strength [dBX]', location='left')
@@ -116,8 +151,8 @@ def plot_transmit_power_map(transmit_power_map, data_points, observed_powers,
     if transmitter_locations is not None:
         tx_coords = np.array([tx['coordinates'] for tx in transmitter_locations.values()])
         plt.scatter(tx_coords[:, 0], tx_coords[:, 1],
-                   marker='x', s=200, c='blue', linewidth=3,
-                   label='Transmitter Locations', zorder=10)
+                   marker='x', s=80, c='blue', linewidth=2,
+                   alpha=0.4, label='Transmitter Locations', zorder=10)
 
     plt.legend()
 
@@ -133,7 +168,8 @@ def plot_transmit_power_map(transmit_power_map, data_points, observed_powers,
     plt.yticks(ticks=[0] + tick_values[1:], labels=[""] + tick_labels[1:], fontsize=14, rotation=90)
 
     # Adjust colorbar positions
-    cbar.ax.set_position([0.77, 0.1, 0.04, 0.8])
+    if cbar is not None:
+        cbar.ax.set_position([0.77, 0.1, 0.04, 0.8])
     scatter_cbar.ax.set_position([0.18, 0.1, 0.04, 0.8])
 
     plt.xlabel('UTM$_E$ [m]', fontsize=18, labelpad=10)
