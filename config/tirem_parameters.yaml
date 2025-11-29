@@ -1,0 +1,23 @@
+# TIREM Propagation Model Parameters
+
+# Frequency in MHz
+frequency_mhz: 3534
+
+# Transmitter height in meters (for grid points)
+# Note: Actual transmitters may have different heights defined in transmitter_locations.yaml
+transmitter_height_m: 8.8
+
+# Receiver height in meters (for sensors)
+receiver_height_m: 2.0
+
+# Polarization ('H' or 'V')
+polarization: 'H'
+
+# Environmental parameters (defaults from TIREM)
+conductivity: 0.028       # S/m (0.00001 to 100.0)
+permittivity: 15.0        # Relative permittivity (1 to 1000)
+humidity: 10.0            # g/m^3 (0 to 110.0)
+surface_refractivity: 301.0 # N-Units (200 to 450.0)
+
+# Map file path (relative to project root or absolute)
+map_file: "SLCmap_5May2022.mat"
