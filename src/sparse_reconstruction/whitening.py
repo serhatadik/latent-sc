@@ -23,7 +23,8 @@ import warnings
 
 
 def compute_whitening_matrix(cov_matrix, method='cholesky', regularization=1e-10,
-                              verbose=True, observed_powers=None):
+                              verbose=True, observed_powers=None,
+                              sigma_noise=1e-13, eta=0.5):
     """
     Compute whitening matrix W = V^(-1/2) from covariance matrix.
 
@@ -37,6 +38,7 @@ def compute_whitening_matrix(cov_matrix, method='cholesky', regularization=1e-10
         - 'svd': More robust, handles near-singular matrices
         - 'eig': Eigenvalue decomposition, middle ground
         - 'diagonal_observation': Diagonal matrix based on observed powers
+        - 'hetero_diag': Heteroscedastic diagonal matrix V_kk = sigma_noise^2 + eta^2 * p_k^2
     regularization : float, optional
         Small value added to diagonal for numerical stability, default: 1e-10
     verbose : bool, optional
@@ -44,6 +46,10 @@ def compute_whitening_matrix(cov_matrix, method='cholesky', regularization=1e-10
     observed_powers : ndarray of shape (M,), optional
         Observed sensor powers (linear scale, mW). Required for method='diagonal_observation'.
         When provided, diagonal whitening matrix W_jj = log10(1 / observed_powers_j) is computed.
+    sigma_noise : float, optional
+        Noise floor variance for 'hetero_diag' method. Default 1e-13.
+    eta : float, optional
+        Scaling factor for signal-dependent variance in 'hetero_diag'. Default 0.5.
 
     Returns
     -------
@@ -110,11 +116,15 @@ def compute_whitening_matrix(cov_matrix, method='cholesky', regularization=1e-10
         if observed_powers is None:
             raise ValueError("observed_powers must be provided for method='diagonal_observation'")
         W = _whitening_diagonal_observation(observed_powers, M, verbose)
+    elif method == 'hetero_diag':
+        if observed_powers is None:
+            raise ValueError("observed_powers must be provided for method='hetero_diag'")
+        W = _whitening_hetero_diag(observed_powers, M, sigma_noise, eta, verbose)
     else:
-        raise ValueError(f"Unknown method: {method}. Choose 'cholesky', 'svd', 'eig', or 'diagonal_observation'")
+        raise ValueError(f"Unknown method: {method}. Choose 'cholesky', 'svd', 'eig', 'diagonal_observation', or 'hetero_diag'")
 
-    # Validate result (skip validation for diagonal_observation as it doesn't use covariance)
-    if verbose and method != 'diagonal_observation':
+    # Validate result (skip validation for diagonal_observation and hetero_diag as they don't use covariance)
+    if verbose and method not in ['diagonal_observation', 'hetero_diag']:
         whitened_cov = W @ cov_matrix @ W.T
         error = np.linalg.norm(whitened_cov - np.eye(M), 'fro') / M
         print(f"  Whitening error: ‖W·V·W^T - I‖_F / M = {error:.2e}")
@@ -124,6 +134,47 @@ def compute_whitening_matrix(cov_matrix, method='cholesky', regularization=1e-10
                 "Check covariance matrix conditioning."
             )
 
+    return W
+
+
+def _whitening_hetero_diag(observed_powers, M, sigma_noise=1e-13, eta=0.5, verbose=True):
+    """
+    Compute heteroscedastic diagonal whitening matrix.
+
+    [V_diag]_kk = sigma_noise^2 + eta^2 * (p_k)^2
+    W = V^(-1/2) = diag(1 / sqrt(V_diag))
+
+    Parameters
+    ----------
+    observed_powers : ndarray
+        Observed powers in linear scale (mW)
+    M : int
+        Number of sensors
+    sigma_noise : float
+        Noise floor variance
+    eta : float
+        Scaling factor for signal-dependent variance
+    verbose : bool
+        Print info
+
+    Returns
+    -------
+    W : ndarray
+        Whitening matrix
+    """
+    # Diagonal elements of V
+    v_diag = sigma_noise**2 + (eta * observed_powers)**2
+    
+    # W = V^(-1/2) is diagonal with elements 1/sqrt(v_diag)
+    w_diag = 1.0 / np.sqrt(v_diag)
+    W = np.diag(w_diag)
+    
+    if verbose:
+        print(f"  Heteroscedastic diagonal whitening:")
+        print(f"    sigma_noise: {sigma_noise:.2e}, eta: {eta:.2f}")
+        print(f"    V_diag range: [{v_diag.min():.2e}, {v_diag.max():.2e}]")
+        print(f"    W_diag range: [{w_diag.min():.2e}, {w_diag.max():.2e}]")
+    
     return W
 
 

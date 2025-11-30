@@ -26,6 +26,7 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
                                  scale=1.0, np_exponent=2, sigma=4.5, delta_c=400,
                                  lambda_reg=0.01, norm_exponent=4, solver='auto',
                                  whitening_method='covariance', gamma=0.0,
+                                 sigma_noise=1e-13, eta=0.5,
                                  max_l2_norm=None, exclusion_radius=50.0,
                                  proximity_weight=50.0, proximity_decay=50.0,
                                  penalty_type='l1', penalty_param=0.5, sparsity_epsilon=1e-6,
@@ -67,9 +68,14 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
         Method for computing whitening matrix, default: 'covariance'
         - 'covariance': Use covariance-based whitening W = V^(-1/2) (standard approach)
         - 'diagonal_observation': Use diagonal matrix W_jj = log10(1/p_j) based on observed powers
+        - 'hetero_diag': Use heteroscedastic diagonal matrix V_kk = sigma_noise^2 + eta^2 * p_k^2
     gamma : float, optional
         Coefficient for negative L2 regularization term: -gamma * ||t||_2^2
         This encourages larger transmit power values, default: 0.0 (disabled)
+    sigma_noise : float, optional
+        Noise floor variance for 'hetero_diag' whitening. Default 1e-13.
+    eta : float, optional
+        Scaling factor for signal-dependent variance in 'hetero_diag'. Default 0.5.
     max_l2_norm : float, optional
         Maximum L2 norm constraint: ||t||_2 ≤ max_l2_norm
         When set, solver automatically switches to 'trust-constr'. Default: None (no constraint)
@@ -173,10 +179,16 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
             cov_matrix, method='diagonal_observation',
             observed_powers=observed_powers_linear, verbose=verbose
         )
+    elif whitening_method == 'hetero_diag':
+        W = compute_whitening_matrix(
+            cov_matrix, method='hetero_diag',
+            observed_powers=observed_powers_linear,
+            sigma_noise=sigma_noise, eta=eta, verbose=verbose
+        )
     else:
         raise ValueError(
             f"Unknown whitening_method '{whitening_method}'. "
-            "Choose 'covariance' or 'diagonal_observation'"
+            "Choose 'covariance', 'diagonal_observation', or 'hetero_diag'"
         )
 
     # Step 4: Build propagation matrix
