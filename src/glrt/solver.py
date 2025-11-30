@@ -10,7 +10,7 @@ import numpy as np
 from scipy import linalg
 from scipy.optimize import lsq_linear
 
-def solve_glrt(observed_powers, A_model, cov_matrix, threshold,
+def solve_glrt(observed_powers, A_model, threshold, cov_matrix=None,
                max_iter=100, verbose=True):
     """
     Whitened Bias-Invariant Iterative GLRT.
@@ -21,10 +21,10 @@ def solve_glrt(observed_powers, A_model, cov_matrix, threshold,
         Observed powers at sensors (p).
     A_model : ndarray of shape (M, N)
         Propagation matrix (A).
-    cov_matrix : ndarray of shape (M, M)
-        Covariance matrix (V).
     threshold : float
         Detection threshold (gamma).
+    cov_matrix : ndarray of shape (M, M), optional
+        Covariance matrix (V). If None, assumes Identity matrix.
     max_iter : int, optional
         Maximum number of iterations (transmitters to detect).
     verbose : bool, optional
@@ -48,19 +48,22 @@ def solve_glrt(observed_powers, A_model, cov_matrix, threshold,
     active_set = []
     
     # Whitening Matrix W = V^(-1/2)
-    # Using Cholesky: V = L L^T => W = L^(-1)
-    try:
-        L = linalg.cholesky(cov_matrix, lower=True)
-        W = linalg.inv(L)
-    except linalg.LinAlgError:
-        # Fallback for singular covariance
-        if verbose:
-            print("Warning: Covariance matrix singular, using pseudo-inverse for whitening.")
-        evals, evecs = linalg.eigh(cov_matrix)
-        # Filter small eigenvalues
-        mask = evals > 1e-10
-        W = evecs[:, mask] @ np.diag(1.0 / np.sqrt(evals[mask])) @ evecs[:, mask].T
-        # Note: This W might not be triangular, but W @ V @ W.T ~ I
+    if cov_matrix is None:
+        W = np.eye(M)
+    else:
+        # Using Cholesky: V = L L^T => W = L^(-1)
+        try:
+            L = linalg.cholesky(cov_matrix, lower=True)
+            W = linalg.inv(L)
+        except linalg.LinAlgError:
+            # Fallback for singular covariance
+            if verbose:
+                print("Warning: Covariance matrix singular, using pseudo-inverse for whitening.")
+            evals, evecs = linalg.eigh(cov_matrix)
+            # Filter small eigenvalues
+            mask = evals > 1e-10
+            W = evecs[:, mask] @ np.diag(1.0 / np.sqrt(evals[mask])) @ evecs[:, mask].T
+            # Note: This W might not be triangular, but W @ V @ W.T ~ I
 
     # Whitened Bias 1_w = W @ 1
     ones_vec = np.ones(M)
