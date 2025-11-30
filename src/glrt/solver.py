@@ -11,7 +11,7 @@ from scipy import linalg
 from scipy.optimize import lsq_linear
 
 def solve_glrt(observed_powers, A_model, threshold, cov_matrix=None,
-               max_iter=100, verbose=True):
+               max_iter=100, verbose=True, sigma_noise=1e-13, eta=0.5):
     """
     Whitened Bias-Invariant Iterative GLRT.
 
@@ -23,12 +23,17 @@ def solve_glrt(observed_powers, A_model, threshold, cov_matrix=None,
         Propagation matrix (A).
     threshold : float
         Detection threshold (gamma).
-    cov_matrix : ndarray of shape (M, M), optional
+    cov_matrix : ndarray of shape (M, M) or str, optional
         Covariance matrix (V). If None, assumes Identity matrix.
+        If 'hetero_diag', uses heteroscedastic diagonal covariance.
     max_iter : int, optional
         Maximum number of iterations (transmitters to detect).
     verbose : bool, optional
         Print progress.
+    sigma_noise : float, optional
+        Noise floor variance for 'hetero_diag' covariance. Default 1e-13.
+    eta : float, optional
+        Scaling factor for signal-dependent variance in 'hetero_diag'. Default 0.5.
 
     Returns
     -------
@@ -50,6 +55,21 @@ def solve_glrt(observed_powers, A_model, threshold, cov_matrix=None,
     # Whitening Matrix W = V^(-1/2)
     if cov_matrix is None:
         W = np.eye(M)
+    elif isinstance(cov_matrix, str) and cov_matrix == 'hetero_diag':
+        # Heteroscedastic Diagonal Covariance
+        # [V_diag]_kk = sigma_noise^2 + eta^2 * (p_k)^2
+        # sigma_noise and eta are now parameters
+        
+        # Diagonal elements of V
+        v_diag = sigma_noise**2 + (eta * observed_powers)**2
+        
+        # W = V^(-1/2) is diagonal with elements 1/sqrt(v_diag)
+        # Avoid division by zero if any v_diag is 0 (unlikely with sigma_noise)
+        w_diag = 1.0 / np.sqrt(v_diag)
+        W = np.diag(w_diag)
+        
+        if verbose:
+            print(f"Using Heteroscedastic Diagonal Covariance (hetero_diag) with sigma_noise={sigma_noise}, eta={eta}.")
     else:
         # Using Cholesky: V = L L^T => W = L^(-1)
         try:
