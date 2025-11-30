@@ -142,7 +142,7 @@ def estimate_transmit_power_single_pixel(pixel_coords, sensor_locations,
 
 def estimate_transmit_power_map(map_shape, sensor_locations, observed_powers,
                                  scale=1.0, np_exponent=2, n_jobs=-1,
-                                 batch_size=100, verbose=True):
+                                 batch_size=100, verbose=True, propagation_matrix=None):
     """
     Estimate transmit power for all pixels in the map.
 
@@ -166,6 +166,9 @@ def estimate_transmit_power_map(map_shape, sensor_locations, observed_powers,
         Batch size for parallel processing (default: 100)
     verbose : bool, optional
         Show progress bar (default: True)
+    propagation_matrix : ndarray of shape (n_sensors, height*width), optional
+        Precomputed propagation matrix with linear path gains.
+        If provided, used instead of log-distance model.
 
     Returns
     -------
@@ -187,6 +190,41 @@ def estimate_transmit_power_map(map_shape, sensor_locations, observed_powers,
     """
     height, width = map_shape
     transmit_power_map = np.zeros((height, width))
+    
+    if propagation_matrix is not None:
+        if verbose:
+            print("Using precomputed propagation matrix for transmit power estimation...")
+            
+        # Vectorized implementation using propagation matrix
+        # For each pixel j, we want to find t_j that minimizes ||e_j(t_j)||_2
+        # e_j(t_j) = (t_j + 10*log10(A[:, j])) - p_observed
+        # Let G_j = 10*log10(A[:, j]) (path loss gain in dB)
+        # e_j(t_j) = t_j + G_j - p_observed
+        # Minimize sum((t_j + G_j - p_observed)^2)
+        # This is a simple 1D quadratic problem: min_x sum((x - c_i)^2)
+        # Solution is x = mean(c_i)
+        # Here x = t_j, c_i = p_observed[i] - G_j[i]
+        # So t_j_opt = mean(p_observed - G_j)
+        
+        # 1. Compute G matrix (dB gains)
+        # A is (M, N), we want G (M, N)
+        # Avoid log(0)
+        with np.errstate(divide='ignore'):
+            G_matrix = 10 * np.log10(np.maximum(propagation_matrix, 1e-20))
+            
+        # 2. Compute optimal t for each pixel
+        # t_opt = mean(p_observed - G_j) over sensors
+        # p_observed is (M,)
+        # p_observed - G_matrix is (M, N) (broadcasting p_observed column-wise)
+        # We want mean over axis 0 (sensors)
+        
+        # Broadcasting: (M, 1) - (M, N) -> (M, N)
+        diffs = observed_powers[:, np.newaxis] - G_matrix
+        t_opts = np.mean(diffs, axis=0) # Shape (N,)
+        
+        transmit_power_map = t_opts.reshape(height, width)
+        
+        return transmit_power_map
 
     # Create list of all pixel coordinates
     all_pixels = [(i, j) for i in range(height) for j in range(width)]

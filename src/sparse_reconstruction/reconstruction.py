@@ -30,6 +30,7 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
                                  proximity_weight=50.0, proximity_decay=50.0,
                                  penalty_type='l1', penalty_param=0.5, sparsity_epsilon=1e-6,
                                  return_linear_scale=False,
+                                 model_type='log_distance', tirem_config_path=None, n_jobs=-1,
                                  verbose=True, **solver_kwargs):
     """
     Perform joint sparse reconstruction to estimate transmit power field.
@@ -91,6 +92,12 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
         Small constant for 'log_sum' and 'lp' penalties. Default: 1e-6
     return_linear_scale : bool, optional
         Return power field in linear scale (mW), default: False (return dBm)
+    model_type : str, optional
+        Propagation model to use: 'log_distance' (default) or 'tirem'
+    tirem_config_path : str, optional
+        Path to TIREM configuration file (required if model_type='tirem')
+    n_jobs : int, optional
+        Number of parallel jobs for TIREM computation, default: -1
     verbose : bool, optional
         Print progress information, default: True
     **solver_kwargs : dict
@@ -125,7 +132,9 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
         print(f"  Sensors: M = {M}")
         print(f"  Grid points: N = {N} ({height}×{width})")
         print(f"  Scale: {scale} m/pixel")
-        print(f"  Path loss exponent: n_p = {np_exponent}")
+        print(f"  Propagation model: {model_type}")
+        if model_type == 'log_distance':
+            print(f"  Path loss exponent: n_p = {np_exponent}")
         print(f"  Sparsity parameter: λ = {lambda_reg:.4e}")
         print(f"  Exclusion radius: {exclusion_radius} m")
         if proximity_weight > 0:
@@ -176,7 +185,8 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
 
     A_model = compute_propagation_matrix(
         sensor_locations, map_shape, scale=scale,
-        np_exponent=np_exponent, vectorized=True, verbose=verbose
+        model_type=model_type, config_path=tirem_config_path,
+        np_exponent=np_exponent, vectorized=True, n_jobs=n_jobs, verbose=verbose
     )
 
     # Step 4.5: Compute exclusion mask

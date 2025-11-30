@@ -112,7 +112,7 @@ def compute_likelihood(error_vector, cov_matrix):
 def compute_transmitter_pmf(transmit_power_map, sensor_locations,
                              observed_powers, cov_matrix,
                              scale=1.0, np_exponent=2,
-                             threshold=1e-10):
+                             threshold=1e-10, propagation_matrix=None):
     """
     Compute probability mass function of transmitter location.
 
@@ -137,6 +137,9 @@ def compute_transmitter_pmf(transmit_power_map, sensor_locations,
         Path loss exponent (default: 2)
     threshold : float, optional
         Minimum probability threshold (default: 1e-10)
+    propagation_matrix : ndarray of shape (n_sensors, height*width), optional
+        Precomputed propagation matrix with linear path gains.
+        If provided, used instead of log-distance model.
 
     Returns
     -------
@@ -160,13 +163,28 @@ def compute_transmitter_pmf(transmit_power_map, sensor_locations,
 
     for i in range(height):
         for j in range(width):
-            transmitter_location = [j, i]  # (col, row) = (x, y)
             ti = transmit_power_map[i, j]
 
-            # Compute predicted powers
-            predicted = compute_path_loss_vector(ti, sensor_locations,
-                                                  transmitter_location,
-                                                  scale, np_exponent)
+            if propagation_matrix is not None:
+                # Use precomputed propagation matrix
+                # Index in flattened array
+                idx = i * width + j
+                # Get linear path gains for this location to all sensors
+                path_gains_linear = propagation_matrix[:, idx]
+                
+                # Convert to dB loss: PL = -10*log10(gain)
+                # Predicted power: P_rx = P_tx + 10*log10(gain)
+                # Avoid log(0)
+                with np.errstate(divide='ignore'):
+                    gain_db = 10 * np.log10(np.maximum(path_gains_linear, 1e-20))
+                
+                predicted = ti + gain_db
+            else:
+                # Use log-distance model
+                transmitter_location = [j, i]  # (col, row) = (x, y)
+                predicted = compute_path_loss_vector(ti, sensor_locations,
+                                                      transmitter_location,
+                                                      scale, np_exponent)
 
             # Compute error
             error = predicted - observed_powers
@@ -194,7 +212,7 @@ def compute_transmitter_pmf(transmit_power_map, sensor_locations,
 
 def estimate_received_power_map(transmit_power_map, pmf, sensor_locations,
                                  target_grid, scale=1.0, np_exponent=2,
-                                 probability_threshold=1e-6):
+                                 probability_threshold=1e-6, propagation_matrix=None):
     """
     Estimate received power at all target locations.
 
@@ -219,6 +237,38 @@ def estimate_received_power_map(transmit_power_map, pmf, sensor_locations,
         Path loss exponent (default: 2)
     probability_threshold : float, optional
         Only use transmitter locations with probability > threshold (default: 1e-6)
+    propagation_matrix : ndarray, optional
+        Precomputed propagation matrix. NOTE: This matrix is typically M x N (sensors x grid).
+        For estimating received power at ALL grid points from ALL grid points, we would need
+        an N x N matrix, which is usually too large.
+        
+        If provided, this function assumes it can be used for sensor locations, but for 
+        arbitrary target locations (like the whole grid), we usually fall back to 
+        log-distance unless we have a full N x N matrix or on-the-fly computation.
+        
+        However, if the 'target_grid' corresponds to the sensor locations (unlikely for a map),
+        we could use it. 
+        
+        In this implementation, we will ONLY use propagation_matrix if we are computing
+        power at the SENSORS (which is not what this function usually does - it computes
+        a map).
+        
+        Actually, for TIREM, we can't easily compute N x N on the fly without the DLL.
+        So for TIREM, we might be limited to what we have.
+        
+        For now, we will stick to log-distance for the full map reconstruction UNLESS
+        propagation_matrix is N x N (unlikely).
+        
+        If propagation_matrix is provided but shape is M x N, we CANNOT use it for 
+        map reconstruction (which needs N x N). We will warn and fall back to log-distance
+        if possible, or raise error if TIREM is required.
+        
+        BUT, since we want to support TIREM, and TIREM is slow, maybe we just don't support
+        full signal strength map for TIREM yet, or we accept it will use log-distance approximation
+        for the visualization part.
+        
+        Let's stick to log-distance for map visualization for now as it's just for visualization.
+        The core localization uses the M x N matrix.
 
     Returns
     -------
@@ -256,6 +306,11 @@ def estimate_received_power_map(transmit_power_map, pmf, sensor_locations,
 
     print(f"Estimating signal strength using {n_locations} high-probability transmitter locations...")
     print("Using vectorized computation for improved performance...")
+    
+    if propagation_matrix is not None:
+        print("Warning: propagation_matrix provided but ignored for signal strength map reconstruction.")
+        print("       Full N x N propagation matrix is required for this, but only M x N is typically available.")
+        print("       Falling back to log-distance model for visualization.")
 
     # Pre-extract all transmitter data once (vectorized preparation)
     # This avoids repeated array indexing in the inner loop
