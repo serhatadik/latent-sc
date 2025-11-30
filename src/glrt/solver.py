@@ -92,6 +92,7 @@ def solve_glrt(observed_powers, A_model, threshold, cov_matrix=None,
     
     iteration = 0
     scores_history = []
+    candidates_history = []
     
     while iteration < max_iter:
         # 2. Whiten & Project Residual
@@ -130,6 +131,25 @@ def solve_glrt(observed_powers, A_model, threshold, cov_matrix=None,
         # 5. Select Best Candidate
         i_star = np.argmax(scores)
         l_max = scores[i_star]
+        
+        # Store top 10 candidates for visualization
+        # Get indices of top 10 scores
+        if len(scores) >= 10:
+            top_10_indices = np.argpartition(scores, -10)[-10:]
+            # Sort them by score descending
+            top_10_indices = top_10_indices[np.argsort(scores[top_10_indices])[::-1]]
+        else:
+            top_10_indices = np.argsort(scores)[::-1]
+            
+        top_10_scores = scores[top_10_indices]
+        
+        candidates_history.append({
+            'iteration': iteration,
+            'top_indices': top_10_indices,
+            'top_scores': top_10_scores,
+            'selected_index': i_star,
+            'selected_score': l_max
+        })
         
         if verbose:
             print(f"Iter {iteration}: Max Score = {l_max:.4f} at index {i_star}")
@@ -189,5 +209,5 @@ def solve_glrt(observed_powers, A_model, threshold, cov_matrix=None,
         t_S = np.array([])
         c_hat = 0.0
         
-    return active_set, t_S, c_hat, {'scores_history': scores_history, 'final_residual': r}
+    return active_set, t_S, c_hat, {'scores_history': scores_history, 'final_residual': r, 'candidates_history': candidates_history}
 
