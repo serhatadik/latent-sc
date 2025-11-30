@@ -19,7 +19,7 @@ from src.propagation.log_distance import compute_linear_path_gain
 def compute_propagation_matrix(sensor_locations, map_shape, scale=1.0,
                                 model_type='log_distance', config_path=None,
                                 np_exponent=2, pi0=0, di0=1,
-                                vectorized=True, verbose=True):
+                                vectorized=True, n_jobs=-1, verbose=True):
     """
     Build propagation matrix A_model ∈ ℝ^(M×N) using the selected propagation model.
 
@@ -43,6 +43,8 @@ def compute_propagation_matrix(sensor_locations, map_shape, scale=1.0,
         Reference distance (m) (for log_distance), default: 1
     vectorized : bool, optional
         Use vectorized computation (for log_distance), default: True
+    n_jobs : int, optional
+        Number of parallel jobs for TIREM computation, default: -1 (all CPUs)
     verbose : bool, optional
         Print progress information, default: True
 
@@ -59,7 +61,7 @@ def compute_propagation_matrix(sensor_locations, map_shape, scale=1.0,
             # Default to standard location if not provided
             config_path = 'config/tirem_parameters.yaml'
         model = TiremModel(config_path)
-        return model.compute_propagation_matrix(sensor_locations, map_shape, scale=scale, verbose=verbose)
+        return model.compute_propagation_matrix(sensor_locations, map_shape, scale=scale, n_jobs=n_jobs, verbose=verbose)
     else:
         raise ValueError(f"Unknown model type: {model_type}")
 

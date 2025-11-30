@@ -6,6 +6,46 @@ from pathlib import Path
 from .base import PropagationModel
 from ..tirem.main_tirem_pred import call_tirem_loss, Params
 from ..tirem.common import build_arrays
+from joblib import Parallel, delayed, cpu_count
+
+def _compute_chunk(indices, width, rx_loc, current_side_len, sampling_interval, current_elev_map, params):
+    """
+    Compute TIREM loss for a chunk of grid points.
+    Helper function for parallel execution.
+    """
+    results = []
+    for i in indices:
+        row = i // width
+        col = i % width
+        tx_loc = np.array([col, row])
+        
+        # Skip if Tx == Rx (approximate check for coincident points)
+        if np.linalg.norm(rx_loc - tx_loc) < 0.5:
+            # Coincident points: set to a default high gain (0 path loss)
+            results.append((i, 1.0))
+            continue
+            
+        # Build profile
+        # build_arrays expects 1-based indexing for the map
+        d_array, e_array = build_arrays(
+            current_side_len, 
+            sampling_interval, 
+            tx_loc + 1, 
+            rx_loc + 1, 
+            current_elev_map
+        )
+        
+        # Calculate loss
+        try:
+            loss_db = call_tirem_loss(d_array, e_array, params)
+            # Convert to linear gain: Gain = 10^(-Loss/10)
+            linear_gain = 10 ** (-loss_db / 10.0)
+            results.append((i, linear_gain))
+        except Exception:
+            # In case of error, set to 0
+            results.append((i, 0.0))
+            
+    return results
 
 
 class TiremModel(PropagationModel):
@@ -74,7 +114,7 @@ class TiremModel(PropagationModel):
         else:
             self.side_len = 30.0 # Default fallback
             
-    def compute_propagation_matrix(self, sensor_locations, map_shape, scale=1.0, verbose=True):
+    def compute_propagation_matrix(self, sensor_locations, map_shape, scale=1.0, n_jobs=-1, verbose=True):
         M = len(sensor_locations)
         height, width = map_shape
         N = height * width
@@ -142,44 +182,30 @@ class TiremModel(PropagationModel):
             rx_col, rx_row = sensor
             rx_loc = np.array([rx_col, rx_row])
             
-            # Loop over grid points (Tx)
-            for i in range(N):
-                row = i // width
-                col = i % width
-                tx_loc = np.array([col, row])
-                
-                # Skip if Tx == Rx (approximate check for coincident points)
-                if np.linalg.norm(rx_loc - tx_loc) < 0.5:
-                    # Coincident points: set to a default high gain or 0 depending on model
-                    # For now, let's assume 0 path loss (gain = 1.0)
-                    A_model[j, i] = 1.0 
-                    continue
-                
-                # Build profile
-                # build_arrays expects 1-based indexing for the map
-                # We pass the grid coordinates directly because the map is now resized to match the grid
-                d_array, e_array = build_arrays(
-                    current_side_len, 
-                    sampling_interval, 
-                    tx_loc + 1, 
-                    rx_loc + 1, 
-                    current_elev_map
-                )
-                
-                # Calculate loss
-                try:
-                    loss_db = call_tirem_loss(d_array, e_array, params)
-                    # Convert to linear gain
-                    # Gain = 10^(-Loss/10)
-                    # TIREM returns positive loss in dB?
-                    # Yes, "LOSS = pointer(c_float(0)) ... return LOSS.contents.value"
-                    
-                    linear_gain = 10 ** (-loss_db / 10.0)
-                    A_model[j, i] = linear_gain
-                except Exception as e:
-                    # In case of error (e.g. coincident points), set to 0 or handle
-                    # print(f"Error at {j}, {i}: {e}")
-                    A_model[j, i] = 0.0
+            # Parallelize over grid points (Tx)
+            # We chunk the grid indices to reduce overhead
+            all_indices = np.arange(N)
+            
+            # Determine number of chunks
+            # If n_jobs is -1, use all CPUs. 
+            n_workers = n_jobs if n_jobs > 0 else cpu_count()
+            # Create enough chunks to keep workers busy, but not too many to cause overhead
+            n_chunks = max(n_workers * 4, 16)
+            chunks = np.array_split(all_indices, n_chunks)
+            
+            if verbose and j == 0:
+                print(f"  Parallelizing with {n_workers} workers over {n_chunks} chunks per sensor...")
+
+            results_list = Parallel(n_jobs=n_jobs)(
+                delayed(_compute_chunk)(
+                    chunk, width, rx_loc, current_side_len, sampling_interval, current_elev_map, params
+                ) for chunk in chunks
+            )
+            
+            # Aggregate results
+            for res in results_list:
+                for idx, val in res:
+                    A_model[j, idx] = val
                     
             if verbose and (j + 1) % max(1, M // 10) == 0:
                 print(f"  Processed {j+1}/{M} sensors...")
