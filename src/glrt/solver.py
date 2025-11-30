@@ -133,9 +133,9 @@ def solve_glrt(observed_powers, A_model, threshold, cov_matrix=None,
         # l_i = (a_tilde_i^T r_tilde)^2 / (||a_tilde_i||^2 * sigma_hat^2)
         
         # Vectorized computation:
-        # Numerator: (A_tilde^T @ r_tilde)^2
+        # Numerator: (max(0, A_tilde^T @ r_tilde))^2
         correlations = A_tilde.T @ r_tilde
-        numerator = correlations**2
+        numerator = np.maximum(0, correlations)**2
         
         # Denominator: A_tilde_norms_sq * sigma_hat_sq
         denominator = A_tilde_norms_sq * sigma_hat_sq
