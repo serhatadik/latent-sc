@@ -115,6 +115,41 @@ class TiremModel(PropagationModel):
             self.side_len = 30.0 # Default fallback
             
     def compute_propagation_matrix(self, sensor_locations, map_shape, scale=1.0, n_jobs=-1, verbose=True):
+        import hashlib
+        import json
+        
+        # Define cache directory
+        CACHE_DIR = Path("../data/cache/tirem")
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+        # Create a unique cache key based on all parameters that affect the result
+        # 1. Sensor locations
+        # 2. Map shape and scale
+        # 3. TIREM configuration (frequency, heights, etc.)
+        # 4. Map file path (in case map changes)
+        
+        cache_params = {
+            'sensor_locations': sensor_locations.tolist() if isinstance(sensor_locations, np.ndarray) else sensor_locations,
+            'map_shape': list(map_shape),
+            'scale': float(scale),
+            'tirem_config': self.config,
+            'map_path': str(self.map_path)
+        }
+        
+        # Create a stable string representation for hashing
+        cache_string = json.dumps(cache_params, sort_keys=True)
+        cache_hash = hashlib.md5(cache_string.encode('utf-8')).hexdigest()
+        
+        cache_file = CACHE_DIR / f"tirem_prop_matrix_{cache_hash}.npy"
+        
+        if cache_file.exists():
+            if verbose:
+                print(f"Loading cached propagation matrix from: {cache_file}")
+            try:
+                return np.load(cache_file)
+            except Exception as e:
+                print(f"Failed to load cache: {e}. Recomputing...")
+        
         M = len(sensor_locations)
         height, width = map_shape
         N = height * width
@@ -209,5 +244,13 @@ class TiremModel(PropagationModel):
                     
             if verbose and (j + 1) % max(1, M // 10) == 0:
                 print(f"  Processed {j+1}/{M} sensors...")
+        
+        # Save to cache
+        if verbose:
+            print(f"Saving propagation matrix to cache: {cache_file}")
+        try:
+            np.save(cache_file, A_model)
+        except Exception as e:
+            print(f"Warning: Failed to save cache: {e}")
                 
         return A_model
