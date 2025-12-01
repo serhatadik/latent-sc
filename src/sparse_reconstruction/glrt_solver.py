@@ -56,6 +56,7 @@ def solve_iterative_glrt(A_model, W, observed_powers,
     t_est = np.zeros(N)
     residual = observed_powers.copy() # r = p (initially, assuming t=0)
     support = [] # List of indices of found transmitters
+    candidates_history = []
     
     # Precompute whitened propagation matrix for GLRT score calculation
     # A_w = W @ A_model
@@ -101,6 +102,25 @@ def solve_iterative_glrt(A_model, W, observed_powers,
         # 2. Select best candidate
         best_idx = np.argmax(scores)
         best_score = scores[best_idx]
+        
+        # Store top 10 candidates for visualization
+        # Get indices of top 10 scores
+        if len(scores) >= 10:
+            top_10_indices = np.argpartition(scores, -10)[-10:]
+            # Sort them by score descending
+            top_10_indices = top_10_indices[np.argsort(scores[top_10_indices])[::-1]]
+        else:
+            top_10_indices = np.argsort(scores)[::-1]
+            
+        top_10_scores = scores[top_10_indices]
+        
+        candidates_history.append({
+            'iteration': k,
+            'top_indices': top_10_indices,
+            'top_scores': top_10_scores,
+            'selected_index': best_idx,
+            'selected_score': best_score
+        })
         
         # Calculate residual energy for normalization
         # ||W r||^2 = r^T W^T W r = r_w^T r_w
@@ -188,6 +208,7 @@ def solve_iterative_glrt(A_model, W, observed_powers,
         'n_nonzero': len(support),
         'support': support,
         'final_score': best_score if 'best_score' in locals() else 0.0,
+        'candidates_history': candidates_history,
         'success': True
     }
     
