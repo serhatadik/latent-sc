@@ -25,9 +25,8 @@ from ..utils.coordinates import euclidean_distance
 def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape,
                                  scale=1.0, np_exponent=2, sigma=4.5, delta_c=400,
                                  lambda_reg=0.01, norm_exponent=4, solver='auto',
-                                 whitening_method='spatial_corr_exp_decay', gamma=0.0,
+                                 whitening_method='spatial_corr_exp_decay',
                                  sigma_noise=1e-13, eta=0.5,
-                                 max_l2_norm=None, exclusion_radius=50.0,
                                  proximity_weight=50.0, proximity_decay=50.0,
                                  penalty_type='l1', penalty_param=0.5, sparsity_epsilon=1e-6,
                                  return_linear_scale=False,
@@ -73,20 +72,10 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
         - 'spatial_corr_exp_decay': Use covariance-based whitening W = V^(-1/2) with exponential decay correlation
         - 'log_inv_power_diag': Use diagonal matrix W_jj = log10(1/p_j) based on observed powers
         - 'hetero_diag': Use heteroscedastic diagonal matrix V_kk = sigma_noise^2 + eta^2 * p_k^2
-    gamma : float, optional
-        Coefficient for negative L2 regularization term: -gamma * ||t||_2^2
-        This encourages larger transmit power values, default: 0.0 (disabled)
     sigma_noise : float, optional
         Noise floor variance for 'hetero_diag' whitening. Default 1e-13.
     eta : float, optional
         Scaling factor for signal-dependent variance in 'hetero_diag'. Default 0.5.
-    max_l2_norm : float, optional
-        Maximum L2 norm constraint: ||t||_2 ≤ max_l2_norm
-        When set, solver automatically switches to 'trust-constr'. Default: None (no constraint)
-    exclusion_radius : float, optional
-        Radius in meters around each sensor where transmit power is forced to zero.
-        Prevents trivial solutions where transmitters are placed on top of sensors.
-        Default: 50.0 meters. Set to 0 to disable.
     proximity_weight : float, optional
         Strength of soft penalty for transmitters near sensors.
         Penalty weight = 1 + proximity_weight * exp(-dist^2 / (2*decay^2))
@@ -157,7 +146,6 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
         if model_type == 'log_distance':
             print(f"  Path loss exponent: n_p = {np_exponent}")
         print(f"  Sparsity parameter: λ = {lambda_reg:.4e}")
-        print(f"  Exclusion radius: {exclusion_radius} m")
         if proximity_weight > 0:
             print(f"  Proximity penalty: weight={proximity_weight}, decay={proximity_decay} m")
         print(f"  Penalty type: {penalty_type}")
@@ -228,44 +216,7 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
         np_exponent=np_exponent, vectorized=True, n_jobs=n_jobs, verbose=verbose
     )
 
-    # Step 4.5: Compute exclusion mask
-    exclusion_mask = None
-    if exclusion_radius > 0:
-        if verbose:
-            print(f"\nStep 4.5: Computing exclusion mask (radius={exclusion_radius}m)...")
-        
-        exclusion_mask = np.zeros(N, dtype=bool)
-        radius_pixels = exclusion_radius / scale
-        radius_pixels_sq = radius_pixels ** 2
-        
-        # For each sensor, mask out nearby pixels
-        for sensor in sensor_locations:
-            sc, sr = sensor # sensor is (col, row)
-            
-            # Bounding box
-            c_min = max(0, int(np.floor(sc - radius_pixels)))
-            c_max = min(width, int(np.ceil(sc + radius_pixels)) + 1)
-            r_min = max(0, int(np.floor(sr - radius_pixels)))
-            r_max = min(height, int(np.ceil(sr + radius_pixels)) + 1)
-            
-            # Clip to map boundaries
-            c_min = max(0, c_min)
-            c_max = min(width, c_max)
-            r_min = max(0, r_min)
-            r_max = min(height, r_max)
-            
-            for r in range(r_min, r_max):
-                for c in range(c_min, c_max):
-                    # Check distance squared
-                    dist_sq = (c - sc)**2 + (r - sr)**2
-                    if dist_sq <= radius_pixels_sq:
-                        idx = r * width + c
-                        exclusion_mask[idx] = True
-        
-        if verbose:
-            n_excluded = np.sum(exclusion_mask)
-            print(f"  Excluded {n_excluded} grid points ({n_excluded/N*100:.2f}%)")
-            
+
     # Step 4.6: Compute proximity weights (soft penalty)
     spatial_weights = None
     if proximity_weight > 0:
@@ -318,9 +269,6 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
             verbose=verbose,
             lambda_reg=lambda_reg,
             norm_exponent=norm_exponent,
-            gamma=gamma,
-            max_l2_norm=max_l2_norm,
-            exclusion_mask=exclusion_mask,
             spatial_weights=spatial_weights,
             penalty_type=penalty_type,
             penalty_param=penalty_param,
@@ -331,8 +279,7 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
     else:
         t_est, solver_info = solve_sparse_reconstruction(
             A_model, W, observed_powers_linear, lambda_reg,
-            solver=solver, norm_exponent=norm_exponent, gamma=gamma,
-            max_l2_norm=max_l2_norm, exclusion_mask=exclusion_mask,
+            solver=solver, norm_exponent=norm_exponent,
             spatial_weights=spatial_weights,
             penalty_type=penalty_type, penalty_param=penalty_param,
             sparsity_epsilon=sparsity_epsilon,
