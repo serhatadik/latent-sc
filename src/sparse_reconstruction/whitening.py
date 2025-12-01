@@ -22,7 +22,7 @@ import numpy as np
 import warnings
 
 
-def compute_whitening_matrix(cov_matrix, method='cholesky', regularization=1e-10,
+def compute_whitening_matrix(cov_matrix=None, method='cholesky', regularization=1e-10,
                               verbose=True, observed_powers=None,
                               sigma_noise=1e-13, eta=0.5):
     """
@@ -30,22 +30,23 @@ def compute_whitening_matrix(cov_matrix, method='cholesky', regularization=1e-10
 
     Parameters
     ----------
-    cov_matrix : ndarray of shape (M, M)
-        Covariance matrix (must be symmetric positive definite)
-    method : {'cholesky', 'svd', 'eig', 'diagonal_observation'}, optional
+    cov_matrix : ndarray of shape (M, M), optional
+        Covariance matrix (must be symmetric positive definite).
+        Required for 'cholesky', 'svd', and 'eig' methods.
+    method : {'cholesky', 'svd', 'eig', 'log_inv_power_diag', 'hetero_diag'}, optional
         Method for computing matrix square root, default: 'cholesky'
         - 'cholesky': Fast, requires positive definite matrix
         - 'svd': More robust, handles near-singular matrices
         - 'eig': Eigenvalue decomposition, middle ground
-        - 'diagonal_observation': Diagonal matrix based on observed powers
+        - 'log_inv_power_diag': Diagonal matrix based on observed powers (W_jj = -log10(p_j))
         - 'hetero_diag': Heteroscedastic diagonal matrix V_kk = sigma_noise^2 + eta^2 * p_k^2
     regularization : float, optional
         Small value added to diagonal for numerical stability, default: 1e-10
     verbose : bool, optional
         Print diagnostic information, default: True
     observed_powers : ndarray of shape (M,), optional
-        Observed sensor powers (linear scale, mW). Required for method='diagonal_observation'.
-        When provided, diagonal whitening matrix W_jj = log10(1 / observed_powers_j) is computed.
+        Observed sensor powers (linear scale, mW). Required for method='log_inv_power_diag' and 'hetero_diag'.
+        When provided for 'log_inv_power_diag', diagonal whitening matrix W_jj = log10(1 / observed_powers_j) is computed.
     sigma_noise : float, optional
         Noise floor variance for 'hetero_diag' method. Default 1e-13.
     eta : float, optional
@@ -60,6 +61,8 @@ def compute_whitening_matrix(cov_matrix, method='cholesky', regularization=1e-10
     ------
     np.linalg.LinAlgError
         If Cholesky decomposition fails (matrix not positive definite)
+    ValueError
+        If required inputs are missing for the selected method.
 
     Examples
     --------
@@ -80,51 +83,66 @@ def compute_whitening_matrix(cov_matrix, method='cholesky', regularization=1e-10
     - SVD is most robust for near-singular or ill-conditioned matrices
     - Small regularization (1e-10) helps with numerical stability
     """
-    M = cov_matrix.shape[0]
+    # Determine dimension M
+    if cov_matrix is not None:
+        M = cov_matrix.shape[0]
+    elif observed_powers is not None:
+        M = observed_powers.shape[0]
+    else:
+        raise ValueError("Either cov_matrix or observed_powers must be provided to determine dimension M")
 
-    # Validate input
-    if cov_matrix.shape != (M, M):
-        raise ValueError(f"Covariance matrix must be square, got shape {cov_matrix.shape}")
+    # Validate cov_matrix if provided
+    if cov_matrix is not None:
+        if cov_matrix.shape != (M, M):
+            raise ValueError(f"Covariance matrix must be square, got shape {cov_matrix.shape}")
 
-    if not np.allclose(cov_matrix, cov_matrix.T):
-        warnings.warn("Covariance matrix is not symmetric, symmetrizing...")
-        cov_matrix = (cov_matrix + cov_matrix.T) / 2
+        if not np.allclose(cov_matrix, cov_matrix.T):
+            warnings.warn("Covariance matrix is not symmetric, symmetrizing...")
+            cov_matrix = (cov_matrix + cov_matrix.T) / 2
 
-    # Add small regularization for numerical stability
-    if regularization > 0:
-        cov_matrix = cov_matrix + regularization * np.eye(M)
+        # Add small regularization for numerical stability
+        if regularization > 0:
+            cov_matrix = cov_matrix + regularization * np.eye(M)
 
-    if verbose:
+        if verbose:
+            print(f"Computing whitening matrix using {method} method...")
+            cond_num = np.linalg.cond(cov_matrix)
+            print(f"  Covariance matrix: {M}×{M}")
+            print(f"  Condition number: {cond_num:.2e}")
+            if cond_num > 1e10:
+                warnings.warn(
+                    f"Covariance matrix is ill-conditioned (κ={cond_num:.2e}). "
+                    "Consider using method='svd' for better stability."
+                )
+    elif verbose:
         print(f"Computing whitening matrix using {method} method...")
-        cond_num = np.linalg.cond(cov_matrix)
-        print(f"  Covariance matrix: {M}×{M}")
-        print(f"  Condition number: {cond_num:.2e}")
-        if cond_num > 1e10:
-            warnings.warn(
-                f"Covariance matrix is ill-conditioned (κ={cond_num:.2e}). "
-                "Consider using method='svd' for better stability."
-            )
 
     # Compute W = V^(-1/2) using specified method
     if method == 'cholesky':
+        if cov_matrix is None:
+            raise ValueError("cov_matrix is required for method='cholesky'")
         W = _whitening_cholesky(cov_matrix, verbose)
     elif method == 'svd':
+        if cov_matrix is None:
+            raise ValueError("cov_matrix is required for method='svd'")
         W = _whitening_svd(cov_matrix, verbose)
     elif method == 'eig':
+        if cov_matrix is None:
+            raise ValueError("cov_matrix is required for method='eig'")
         W = _whitening_eig(cov_matrix, verbose)
-    elif method == 'diagonal_observation':
+    elif method == 'log_inv_power_diag':
         if observed_powers is None:
-            raise ValueError("observed_powers must be provided for method='diagonal_observation'")
+            raise ValueError("observed_powers must be provided for method='log_inv_power_diag'")
         W = _whitening_diagonal_observation(observed_powers, M, verbose)
     elif method == 'hetero_diag':
         if observed_powers is None:
             raise ValueError("observed_powers must be provided for method='hetero_diag'")
         W = _whitening_hetero_diag(observed_powers, M, sigma_noise, eta, verbose)
     else:
-        raise ValueError(f"Unknown method: {method}. Choose 'cholesky', 'svd', 'eig', 'diagonal_observation', or 'hetero_diag'")
+        raise ValueError(f"Unknown method: {method}. Choose 'cholesky', 'svd', 'eig', 'log_inv_power_diag', or 'hetero_diag'")
 
-    # Validate result (skip validation for diagonal_observation and hetero_diag as they don't use covariance)
-    if verbose and method not in ['diagonal_observation', 'hetero_diag']:
+    # Validate result (only if cov_matrix was used/provided)
+    if verbose and cov_matrix is not None and method not in ['log_inv_power_diag', 'hetero_diag']:
         whitened_cov = W @ cov_matrix @ W.T
         error = np.linalg.norm(whitened_cov - np.eye(M), 'fro') / M
         print(f"  Whitening error: ‖W·V·W^T - I‖_F / M = {error:.2e}")

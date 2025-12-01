@@ -25,7 +25,7 @@ from ..utils.coordinates import euclidean_distance
 def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape,
                                  scale=1.0, np_exponent=2, sigma=4.5, delta_c=400,
                                  lambda_reg=0.01, norm_exponent=4, solver='auto',
-                                 whitening_method='covariance', gamma=0.0,
+                                 whitening_method='spatial_corr_exp_decay', gamma=0.0,
                                  sigma_noise=1e-13, eta=0.5,
                                  max_l2_norm=None, exclusion_radius=50.0,
                                  proximity_weight=50.0, proximity_decay=50.0,
@@ -51,9 +51,11 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
     np_exponent : float, optional
         Path loss exponent, default: 2.0 (free space)
     sigma : float, optional
-        Shadowing standard deviation (dB), default: 4.5
+        Shadowing standard deviation (dB), default: 4.5.
+        Only used if whitening_method='spatial_corr_exp_decay'.
     delta_c : float, optional
-        Correlation distance (meters), default: 400
+        Correlation distance (meters), default: 400.
+        Only used if whitening_method='spatial_corr_exp_decay'.
     lambda_reg : float, optional
         Sparsity regularization parameter, default: 0.01
         - Larger λ → sparser solution (fewer transmitters)
@@ -64,10 +66,10 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
         Higher values increase emphasis on path gain differences
     solver : {'auto', 'cvxpy', 'sklearn', 'scipy'}, optional
         Optimization solver, default: 'auto'
-    whitening_method : {'covariance', 'diagonal_observation'}, optional
-        Method for computing whitening matrix, default: 'covariance'
-        - 'covariance': Use covariance-based whitening W = V^(-1/2) (standard approach)
-        - 'diagonal_observation': Use diagonal matrix W_jj = log10(1/p_j) based on observed powers
+    whitening_method : {'spatial_corr_exp_decay', 'log_inv_power_diag', 'hetero_diag'}, optional
+        Method for computing whitening matrix, default: 'spatial_corr_exp_decay'
+        - 'spatial_corr_exp_decay': Use covariance-based whitening W = V^(-1/2) with exponential decay correlation
+        - 'log_inv_power_diag': Use diagonal matrix W_jj = log10(1/p_j) based on observed powers
         - 'hetero_diag': Use heteroscedastic diagonal matrix V_kk = sigma_noise^2 + eta^2 * p_k^2
     gamma : float, optional
         Coefficient for negative L2 regularization term: -gamma * ||t||_2^2
@@ -157,38 +159,42 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
     if verbose:
         print(f"  Output range: [{observed_powers_linear.min():.2e}, {observed_powers_linear.max():.2e}] mW")
 
-    # Step 2: Build covariance matrix
-    if verbose:
-        print(f"\nStep 2: Building covariance matrix...")
-        print(f"  Shadowing σ = {sigma} dB")
-        print(f"  Correlation distance δ_c = {delta_c} m")
+    # Step 2: Build covariance matrix (only if needed)
+    cov_matrix = None
+    if whitening_method == 'spatial_corr_exp_decay':
+        if verbose:
+            print(f"\nStep 2: Building covariance matrix...")
+            print(f"  Shadowing σ = {sigma} dB")
+            print(f"  Correlation distance δ_c = {delta_c} m")
 
-    cov_matrix = build_covariance_matrix(
-        sensor_locations, sigma=sigma, delta_c=delta_c, scale=scale
-    )
+        cov_matrix = build_covariance_matrix(
+            sensor_locations, sigma=sigma, delta_c=delta_c, scale=scale
+        )
+    elif verbose:
+        print(f"\nStep 2: Skipping covariance matrix build (not needed for {whitening_method})...")
 
     # Step 3: Compute whitening matrix
     if verbose:
         print(f"\nStep 3: Computing whitening matrix...")
         print(f"  Method: {whitening_method}")
 
-    if whitening_method == 'covariance':
+    if whitening_method == 'spatial_corr_exp_decay':
         W = compute_whitening_matrix(cov_matrix, method='cholesky', verbose=verbose)
-    elif whitening_method == 'diagonal_observation':
+    elif whitening_method == 'log_inv_power_diag':
         W = compute_whitening_matrix(
-            cov_matrix, method='diagonal_observation',
+            None, method='log_inv_power_diag',
             observed_powers=observed_powers_linear, verbose=verbose
         )
     elif whitening_method == 'hetero_diag':
         W = compute_whitening_matrix(
-            cov_matrix, method='hetero_diag',
+            None, method='hetero_diag',
             observed_powers=observed_powers_linear,
             sigma_noise=sigma_noise, eta=eta, verbose=verbose
         )
     else:
         raise ValueError(
             f"Unknown whitening_method '{whitening_method}'. "
-            "Choose 'covariance', 'diagonal_observation', or 'hetero_diag'"
+            "Choose 'spatial_corr_exp_decay', 'log_inv_power_diag', or 'hetero_diag'"
         )
 
     # Step 4: Build propagation matrix
