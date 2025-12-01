@@ -30,12 +30,14 @@ def solve_sparse_reconstruction(A_model, W, observed_powers, lambda_reg,
                                  sparsity_threshold=0, gamma=0.0, max_l2_norm=None,
                                  exclusion_mask=None, spatial_weights=None,
                                  penalty_type='l1', penalty_param=0.5, sparsity_epsilon=1e-6,
+                                 use_linear_objective=False,
                                  **solver_kwargs):
     """
     Solve sparse reconstruction problem with automatic solver selection.
 
     Solves:
-        min  ‖W(log10(A·t) - log10(p))‖₂² + R(t)
+        min  ‖W(log10(A·t) - log10(p))‖₂² + R(t)  (if use_linear_objective=False)
+        min  ‖W(A·t - p)‖₂² + R(t)                (if use_linear_objective=True)
         t≥0
     
     where R(t) is the sparsity penalty:
@@ -100,6 +102,9 @@ def solve_sparse_reconstruction(A_model, W, observed_powers, lambda_reg,
         Parameter for 'lp' penalty (p value). Default: 0.5
     sparsity_epsilon : float, optional
         Small constant for 'log_sum' and 'lp' penalties. Default: 1e-6
+    use_linear_objective : bool, optional
+        If True, solve in linear domain: min ||W(At - p)||^2.
+        If False (default), solve in log domain: min ||W(log(At) - log(p))||^2.
     **solver_kwargs
         Additional keyword arguments passed to specific solver
 
@@ -129,7 +134,7 @@ def solve_sparse_reconstruction(A_model, W, observed_powers, lambda_reg,
     """
     if verbose:
         print(f"\n{'='*60}")
-        print(f"Sparse Reconstruction Solver (Log-Domain)")
+        print(f"Sparse Reconstruction Solver ({'Linear' if use_linear_objective else 'Log'}-Domain)")
         print(f"{'='*60}")
         print(f"Problem size: M={A_model.shape[0]} sensors, N={A_model.shape[1]} grid points")
         if np.isscalar(lambda_reg):
@@ -177,6 +182,7 @@ def solve_sparse_reconstruction(A_model, W, observed_powers, lambda_reg,
             penalty_type=penalty_type,
             penalty_param=penalty_param,
             sparsity_epsilon=sparsity_epsilon,
+            use_linear_objective=use_linear_objective,
             **solver_kwargs
         )
     else:
@@ -212,12 +218,17 @@ def solve_sparse_reconstruction_scipy(A_model, W, observed_powers, lambda_reg,
                                        gamma=0.0, max_l2_norm=None, exclusion_mask=None, 
                                        spatial_weights=None, 
                                        penalty_type='l1', penalty_param=0.5, sparsity_epsilon=1e-6,
+                                       use_linear_objective=False,
                                        **scipy_kwargs):
     """
-    Solve sparse reconstruction using scipy.optimize (L-BFGS-B) with log-domain objective.
+    Solve sparse reconstruction using scipy.optimize (L-BFGS-B).
 
     Objective:
-        min ‖W(log10(A·t + ε) - log10(p + ε))‖₂² + R(t)
+        If use_linear_objective=False:
+            min ‖W(log10(A·t + ε) - log10(p + ε))‖₂² + R(t)
+        If use_linear_objective=True:
+            min ‖W(A·t - p)‖₂² + R(t)
+        
         t≥0
 
     Parameters
@@ -267,6 +278,8 @@ def solve_sparse_reconstruction_scipy(A_model, W, observed_powers, lambda_reg,
         Parameter for 'lp' penalty (p value). Default: 0.5
     sparsity_epsilon : float, optional
         Small constant for 'log_sum' and 'lp' penalties. Default: 1e-6
+    use_linear_objective : bool, optional
+        If True, solve in linear domain. Default: False
     **scipy_kwargs
         Additional arguments for scipy.optimize.minimize
 
@@ -289,20 +302,16 @@ def solve_sparse_reconstruction_scipy(A_model, W, observed_powers, lambda_reg,
         if max_l2_norm is not None:
             print(f"Using scipy L-BFGS-B solver with barrier penalty for L2 constraint ||t||_2 ≤ {max_l2_norm}...")
         else:
-            print("Using scipy L-BFGS-B solver (Log-Domain)...")
+            print(f"Using scipy L-BFGS-B solver ({'Linear' if use_linear_objective else 'Log'}-Domain)...")
 
     # Precompute constant terms
-    # log10(p + epsilon)
-    log_p = np.log10(observed_powers + epsilon)
-    
-    # Whitened log observed powers: W @ log_p
-    # Note: W is applied to the difference of logs, so we can't pre-multiply W with log_p alone 
-    # if we want to keep the structure W(log(At) - log(p)). 
-    # Actually we can: W(a - b) = Wa - Wb. So yes, we can precompute W @ log_p.
-    p_tilde = W @ log_p
-
-    # Precompute W^T W for gradient calculation efficiency if needed, 
-    # but W is small (MxM), so W.T @ (W @ r) is fast enough.
+    if not use_linear_objective:
+        # log10(p + epsilon)
+        log_p = np.log10(observed_powers + epsilon)
+        p_tilde = W @ log_p
+    else:
+        # Linear domain: W @ p
+        p_whitened = W @ observed_powers
 
     # Precompute weights for L1 penalty (cancel path loss bias)
     # Omega_ii = ||a_i||_2^norm_exponent
@@ -356,8 +365,6 @@ def solve_sparse_reconstruction_scipy(A_model, W, observed_powers, lambda_reg,
             weights = sensitivity_weights * sparsity_weights
             
             # Normalize so that the minimum weight (for largest signal) is 1.0
-            # This ensures that the regularization on the signal is at least lambda_reg,
-            # while the regularization on noise/zeros is scaled up.
             if weights.min() > 0:
                 weights = weights / weights.min()
             elif weights.max() > 0:
@@ -379,63 +386,58 @@ def solve_sparse_reconstruction_scipy(A_model, W, observed_powers, lambda_reg,
 
         def objective(t):
             """
-            Objective function: ‖W(log10(A·t + ε) - log10(p + ε))‖₂² + R(t) - γ‖t‖₂² + barrier
+            Objective function: Data Fidelity + Regularization + Constraints
             """
             # 1. Compute A·t
             At = A_model @ t
             
-            # 2. Compute log10(A·t + ε)
-            log_At = np.log10(At + epsilon)
-            
-            # 3. Compute residual vector in log domain: log(At) - log(p)
-            # We already have log_p, so this is log_At - log_p
-            log_diff = log_At - log_p
-            
-            # 4. Apply whitening: W(log_diff)
-            # Equivalent to W @ log_At - p_tilde
-            whitened_diff = W @ log_diff
+            if not use_linear_objective:
+                # Log Domain
+                # 2. Compute log10(A·t + ε)
+                log_At = np.log10(At + epsilon)
+                
+                # 3. Compute residual vector in log domain: log(At) - log(p)
+                log_diff = log_At - log_p
+                
+                # 4. Apply whitening: W(log_diff)
+                whitened_diff = W @ log_diff
+            else:
+                # Linear Domain
+                # 2. Compute residual: At - p
+                diff = At - observed_powers
+                
+                # 3. Apply whitening: W(diff)
+                whitened_diff = W @ diff
             
             # 5. Data fidelity term: squared L2 norm
             data_term = np.sum(whitened_diff**2)
             
             # 6. Regularization term: Weighted penalty
-            # lambda_vec already includes the weights
             if penalty_type == 'l1':
                 regularization_term = np.sum(lambda_vec * np.abs(t))
             elif penalty_type == 'log_sum':
-                # sum lambda * log(t + eps)
-                # Use a separate epsilon for sparsity penalty to control sharpness
                 regularization_term = np.sum(lambda_vec * np.log(t + sparsity_epsilon))
             elif penalty_type == 'lp':
-                # sum lambda * (t + eps)^p
                 regularization_term = np.sum(lambda_vec * (t + sparsity_epsilon)**penalty_param)
             else:
-                # Fallback to L1
                 regularization_term = np.sum(lambda_vec * np.abs(t))
             
             # 7. Negative L2 regularization: -γ‖t‖₂² (with overflow protection)
             t_squared_sum = np.sum(t**2)
-            # Clip to prevent overflow
             t_squared_sum = np.clip(t_squared_sum, 0, 1e100)
             negative_l2_term = -gamma * t_squared_sum
             
-            # 8. Exponential barrier for L2 constraint: smoother and numerically stable
+            # 8. Exponential barrier for L2 constraint
             barrier_term = 0.0
             if max_l2_norm is not None:
                 t_norm_squared = t_squared_sum  # Reuse computation
                 max_norm_squared = max_l2_norm**2
-                
-                # Ratio of actual norm to max norm
                 norm_ratio = t_norm_squared / max_norm_squared if max_norm_squared > 0 else 0
                 
-                # Exponential barrier: grows rapidly as we approach/exceed limit
-                # This is more stable than quadratic and self-scales
-                if norm_ratio > 0.5:  # Only activate when getting close
-                    # exp(k * (ratio - 1)) where k controls steepness
-                    # Adaptive barrier coefficient based on problem scale
-                    barrier_coeff = max(1e3, 1e6 / (1 + gamma * 1e6))  # Scale with gamma
-                    exponent = 10 * (norm_ratio - 1)  # Clip to prevent overflow
-                    exponent = np.clip(exponent, -50, 50)  # Prevent exp overflow
+                if norm_ratio > 0.5:
+                    barrier_coeff = max(1e3, 1e6 / (1 + gamma * 1e6))
+                    exponent = 10 * (norm_ratio - 1)
+                    exponent = np.clip(exponent, -50, 50)
                     barrier_term = barrier_coeff * (np.exp(exponent) - 1)
                 
             return data_term + regularization_term + negative_l2_term + barrier_term
@@ -446,33 +448,45 @@ def solve_sparse_reconstruction_scipy(A_model, W, observed_powers, lambda_reg,
             """
             # Forward pass (recompute needed parts)
             At = A_model @ t
-            u = At + epsilon
-            log_At = np.log10(u)
-            log_diff = log_At - log_p
-            whitened_diff = W @ log_diff  # This is r
             
-            # Backprop
-            # 1. W^T * r
-            WTr = W.T @ whitened_diff
-            
-            # 2. diag(1/u) * W^T * r  => WTr / u (element-wise division)
-            term2 = WTr / u
-            
-            # 3. A^T * term2
-            grad_data_part = A_model.T @ term2
-            
-            # 4. Scale by 2 / ln(10)
-            grad_data = (2 / np.log(10)) * grad_data_part
+            if not use_linear_objective:
+                # Log Domain Gradient
+                u = At + epsilon
+                log_At = np.log10(u)
+                log_diff = log_At - log_p
+                whitened_diff = W @ log_diff  # This is r
+                
+                # Backprop
+                # 1. W^T * r
+                WTr = W.T @ whitened_diff
+                
+                # 2. diag(1/u) * W^T * r  => WTr / u (element-wise division)
+                term2 = WTr / u
+                
+                # 3. A^T * term2
+                grad_data_part = A_model.T @ term2
+                
+                # 4. Scale by 2 / ln(10)
+                grad_data = (2 / np.log(10)) * grad_data_part
+            else:
+                # Linear Domain Gradient
+                # f = ||W(At - p)||^2
+                # grad = 2 A^T W^T W (At - p)
+                diff = At - observed_powers
+                whitened_diff = W @ diff # r_w
+                
+                # W^T * r_w
+                WTr = W.T @ whitened_diff
+                
+                # 2 A^T * WTr
+                grad_data = 2 * A_model.T @ WTr
             
             # Regularization gradient
             if penalty_type == 'l1':
-                # Gradient of sum(lambda_vec * |t|) is lambda_vec * sign(t)
                 grad_reg = lambda_vec * np.sign(t)
             elif penalty_type == 'log_sum':
-                # Gradient of sum(lambda * log(t + eps)) is lambda / (t + eps)
                 grad_reg = lambda_vec / (t + sparsity_epsilon)
             elif penalty_type == 'lp':
-                # Gradient of sum(lambda * (t + eps)^p) is lambda * p * (t + eps)^(p-1)
                 grad_reg = lambda_vec * penalty_param * (t + sparsity_epsilon)**(penalty_param - 1)
             else:
                 grad_reg = lambda_vec * np.sign(t)
@@ -487,13 +501,10 @@ def solve_sparse_reconstruction_scipy(A_model, W, observed_powers, lambda_reg,
                 max_norm_squared = max_l2_norm**2
                 norm_ratio = t_norm_squared / max_norm_squared if max_norm_squared > 0 else 0
                 
-                if norm_ratio > 0.5:  # Only when barrier is active
+                if norm_ratio > 0.5:
                     barrier_coeff = max(1e3, 1e6 / (1 + gamma * 1e6))
                     exponent = 10 * (norm_ratio - 1)
                     exponent = np.clip(exponent, -50, 50)
-                    
-                    # Gradient: d/dt exp(10*(||t||^2/max^2 - 1))
-                    # = exp(...) * 10 * (2t) / max^2
                     exp_val = np.exp(exponent)
                     grad_barrier = barrier_coeff * exp_val * 10 * (2 * t) / max_norm_squared
                 

@@ -32,7 +32,7 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
                                  penalty_type='l1', penalty_param=0.5, sparsity_epsilon=1e-6,
                                  return_linear_scale=False,
                                  model_type='log_distance', tirem_config_path=None, n_jobs=-1,
-                                 verbose=True, **solver_kwargs):
+                                 verbose=True, input_is_linear=False, solve_in_linear_domain=None, **solver_kwargs):
     """
     Perform joint sparse reconstruction to estimate transmit power field.
 
@@ -43,7 +43,9 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
     sensor_locations : ndarray of shape (M, 2)
         Sensor coordinates in pixel space (col, row)
     observed_powers_dBm : ndarray of shape (M,)
-        Observed powers at sensors in dBm (e.g., -80 dBm)
+        Observed powers at sensors.
+        - If input_is_linear=False (default): Values are in dBm (e.g., -80 dBm)
+        - If input_is_linear=True: Values are in linear scale (mW)
     map_shape : tuple of (height, width)
         Shape of the reconstruction grid
     scale : float, optional
@@ -108,6 +110,13 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
         Number of parallel jobs for TIREM computation, default: -1
     verbose : bool, optional
         Print progress information, default: True
+    input_is_linear : bool, optional
+        If True, observed_powers_dBm is treated as linear power (mW) and not converted.
+        Default: False (treat as dBm)
+    solve_in_linear_domain : bool, optional
+        If True, solve the optimization problem in linear domain: min ||W(At - p)||^2.
+        If False, solve in log domain: min ||W(log(At) - log(p))||^2.
+        If None (default), infers from input_is_linear (True if input_is_linear else False).
     **solver_kwargs : dict
         Additional arguments passed to solver
 
@@ -131,6 +140,10 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
         print("JOINT SPARSE SUPERPOSITION RECONSTRUCTION")
         print("="*70)
 
+    # Determine solving domain
+    if solve_in_linear_domain is None:
+        solve_in_linear_domain = input_is_linear
+
     M = len(sensor_locations)
     height, width = map_shape
     N = height * width
@@ -148,13 +161,21 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
         if proximity_weight > 0:
             print(f"  Proximity penalty: weight={proximity_weight}, decay={proximity_decay} m")
         print(f"  Penalty type: {penalty_type}")
+        print(f"  Input domain: {'Linear (mW)' if input_is_linear else 'Logarithmic (dBm)'}")
+        print(f"  Solver domain: {'Linear' if solve_in_linear_domain else 'Logarithmic'}")
 
     # Step 1: Convert observed powers from dBm to linear scale (mW)
     if verbose:
-        print(f"\nStep 1: Converting observed powers to linear scale...")
-        print(f"  Input range: [{observed_powers_dBm.min():.1f}, {observed_powers_dBm.max():.1f}] dBm")
+        print(f"\nStep 1: Processing observed powers...")
+        if input_is_linear:
+             print(f"  Input range: [{observed_powers_dBm.min():.2e}, {observed_powers_dBm.max():.2e}] mW")
+        else:
+             print(f"  Input range: [{observed_powers_dBm.min():.1f}, {observed_powers_dBm.max():.1f}] dBm")
 
-    observed_powers_linear = dbm_to_linear(observed_powers_dBm)
+    if input_is_linear:
+        observed_powers_linear = observed_powers_dBm
+    else:
+        observed_powers_linear = dbm_to_linear(observed_powers_dBm)
 
     if verbose:
         print(f"  Output range: [{observed_powers_linear.min():.2e}, {observed_powers_linear.max():.2e}] mW")
@@ -304,6 +325,7 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
             penalty_type=penalty_type,
             penalty_param=penalty_param,
             sparsity_epsilon=sparsity_epsilon,
+            use_linear_objective=solve_in_linear_domain,
             **solver_kwargs
         )
     else:
@@ -314,7 +336,9 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
             spatial_weights=spatial_weights,
             penalty_type=penalty_type, penalty_param=penalty_param,
             sparsity_epsilon=sparsity_epsilon,
-            verbose=verbose, **solver_kwargs
+            verbose=verbose,
+            use_linear_objective=solve_in_linear_domain,
+            **solver_kwargs
         )
 
     # Step 6: Reshape to map
