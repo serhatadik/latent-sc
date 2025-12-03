@@ -13,7 +13,7 @@ import numpy as np
 from .sparse_solver import solve_sparse_reconstruction_scipy
 
 def solve_iterative_glrt(A_model, W, observed_powers, 
-                         glrt_max_iter=10, glrt_threshold=0.01,
+                         glrt_max_iter=10, glrt_threshold=4.0,
                          verbose=True, **solver_kwargs):
     """
     Solve for transmit power using Sequential "Add-One" Detection (GLRT).
@@ -30,7 +30,7 @@ def solve_iterative_glrt(A_model, W, observed_powers,
         Maximum number of transmitters to find. Default: 10
     glrt_threshold : float, optional
         Minimum normalized GLRT score (R^2) to accept a new transmitter. 
-        Range [0, 1]. Default: 0.01 (1% variance explained)
+        Range [0, 1]. Default: 4.0 (400% variance explained - usually requires unnormalized score)
     verbose : bool, optional
         Print progress. Default: True
     **solver_kwargs
@@ -138,8 +138,11 @@ def solve_iterative_glrt(A_model, W, observed_powers,
             print(f"  Normalized Score (R^2): {best_score_norm:.4e}")
             
         # 3. Test threshold
-        # We use the normalized score for the threshold check to be scale-invariant
-        if best_score_norm < glrt_threshold:
+        # If threshold > 1.0, we assume it's a raw score threshold (e.g. 4.0)
+        # If threshold <= 1.0, we assume it's a normalized score threshold (R^2)
+        score_to_check = best_score if glrt_threshold > 1.0 else best_score_norm
+        
+        if score_to_check < glrt_threshold:
             if verbose:
                 print(f"  Normalized score below threshold ({glrt_threshold:.2e}). Stopping.")
             break
