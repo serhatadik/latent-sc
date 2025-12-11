@@ -31,6 +31,7 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
                                  penalty_type='l1', penalty_param=0.5, sparsity_epsilon=1e-6,
                                  return_linear_scale=False,
                                  model_type='log_distance', tirem_config_path=None, n_jobs=-1,
+                                 selection_method='max', cluster_distance_m=100.0, cluster_threshold_fraction=0.1,
                                  verbose=True, input_is_linear=False, solve_in_linear_domain=None, **solver_kwargs):
     """
     Perform joint sparse reconstruction to estimate transmit power field.
@@ -97,6 +98,17 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
         Path to TIREM configuration file (required if model_type='tirem')
     n_jobs : int, optional
         Number of parallel jobs for TIREM computation, default: -1
+    selection_method : {'max', 'cluster'}, optional
+        Method for selecting the best candidate in GLRT solver. Default: 'max'
+        - 'max': Select the single location with maximum GLRT score
+        - 'cluster': Identify clusters of high-scoring locations and select 
+          the centroid of the strongest cluster (by sum of scores)
+    cluster_distance_m : float, optional
+        Maximum distance in meters to consider two candidates as part of the same cluster.
+        Default: 100.0 meters. Only used when selection_method='cluster'.
+    cluster_threshold_fraction : float, optional
+        Fraction of max score for candidate inclusion in clustering (e.g., 0.1 = 10%).
+        Default: 0.1. Only used when selection_method='cluster'.
     verbose : bool, optional
         Print progress information, default: True
     input_is_linear : bool, optional
@@ -266,6 +278,11 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
         from .glrt_solver import solve_iterative_glrt
         t_est, solver_info = solve_iterative_glrt(
             A_model, W, observed_powers_linear,
+            selection_method=selection_method,
+            map_shape=map_shape,
+            scale=scale,
+            cluster_distance_m=cluster_distance_m,
+            cluster_threshold_fraction=cluster_threshold_fraction,
             verbose=verbose,
             lambda_reg=lambda_reg,
             norm_exponent=norm_exponent,
