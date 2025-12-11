@@ -173,7 +173,7 @@ def solve_iterative_glrt(A_model, W, observed_powers,
                          glrt_max_iter=10, glrt_threshold=4.0,
                          selection_method='max', map_shape=None, scale=1.0,
                          cluster_distance_m=100.0, cluster_threshold_fraction=0.1,
-                         cluster_max_candidates=100,
+                         cluster_max_candidates=100, dedupe_distance_m=25.0,
                          verbose=True, **solver_kwargs):
     """
     Solve for transmit power using Sequential "Add-One" Detection (GLRT).
@@ -209,6 +209,10 @@ def solve_iterative_glrt(A_model, W, observed_powers,
     cluster_max_candidates : int, optional
         Maximum number of top-scoring candidates to consider for clustering.
         Default: 100. Set to None or 0 to use threshold_fraction instead.
+    dedupe_distance_m : float, optional
+        Distance threshold in meters for deduplicating transmitters after iterations.
+        Transmitters within this distance of each other are merged, keeping the one
+        added earliest. Default: 25.0. Set to 0 or None to disable deduplication.
     verbose : bool, optional
         Print progress. Default: True
     **solver_kwargs
@@ -398,6 +402,68 @@ def solve_iterative_glrt(A_model, W, observed_powers,
             resid_norm = np.linalg.norm(W @ residual)
             print(f"  Residual norm: {resid_norm:.4e}")
 
+    # Deduplicate transmitters that are within dedupe_distance_m of each other
+    # Keep the one added earliest (first in support list)
+    if len(support) > 1 and map_shape is not None and dedupe_distance_m and dedupe_distance_m > 0:
+        height, width = map_shape
+        dedupe_distance_px = dedupe_distance_m / scale
+        
+        # Convert support indices to (row, col) coordinates
+        support_rows = np.array([idx // width for idx in support])
+        support_cols = np.array([idx % width for idx in support])
+        support_coords = np.column_stack((support_rows, support_cols))
+        
+        # Track which indices to keep (earliest one in each group)
+        keep_mask = np.ones(len(support), dtype=bool)
+        
+        # For each transmitter, check if any earlier transmitter is within dedupe distance
+        for i in range(1, len(support)):
+            if not keep_mask[i]:
+                continue
+            # Check distance to all earlier transmitters that are still kept
+            for j in range(i):
+                if not keep_mask[j]:
+                    continue
+                dist = np.sqrt(np.sum((support_coords[i] - support_coords[j])**2))
+                dist_m = dist * scale
+                if dist_m <= dedupe_distance_m:
+                    # Remove the later one (i), keep the earlier one (j)
+                    keep_mask[i] = False
+                    if verbose:
+                        print(f"\nDeduplication: Removing transmitter at index {support[i]} "
+                              f"(iter {i+1}), within {dist_m:.1f}m of index {support[j]} (iter {j+1})")
+                    break
+        
+        # Apply deduplication
+        original_support = support.copy()
+        support = [s for s, keep in zip(support, keep_mask) if keep]
+        n_removed = len(original_support) - len(support)
+        
+        if n_removed > 0:
+            if verbose:
+                print(f"\nDeduplication: Removed {n_removed} duplicate transmitter(s), "
+                      f"{len(support)} remaining")
+            
+            # Re-optimize with deduplicated support
+            if len(support) > 0:
+                A_sub = A_model[:, support]
+                kwargs_copy = solver_kwargs.copy()
+                kwargs_copy['lambda_reg'] = 0.0
+                kwargs_copy['enable_reweighting'] = False
+                spatial_weights = kwargs_copy.get('spatial_weights', None)
+                if spatial_weights is not None:
+                    kwargs_copy['spatial_weights'] = spatial_weights[support]
+                kwargs_copy['exclusion_mask'] = None
+                
+                t_sub, _ = solve_sparse_reconstruction_scipy(
+                    A_sub, W, observed_powers,
+                    verbose=False,
+                    **kwargs_copy
+                )
+                
+                t_est[:] = 0.0
+                t_est[support] = t_sub
+    
     # Final info
     info = {
         'solver_used': 'glrt',
@@ -407,6 +473,7 @@ def solve_iterative_glrt(A_model, W, observed_powers,
         'support': support,
         'final_score': best_score if 'best_score' in locals() else 0.0,
         'candidates_history': candidates_history,
+        'deduplication_applied': len(support) < k if 'k' in locals() else False,
         'success': True
     }
     
