@@ -32,6 +32,7 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
                                  return_linear_scale=False,
                                  model_type='log_distance', tirem_config_path=None, n_jobs=-1,
                                  selection_method='max', cluster_distance_m=100.0, cluster_threshold_fraction=0.1,
+                                 cluster_max_candidates=100,
                                  dedupe_distance_m=25.0,
                                  verbose=True, input_is_linear=False, solve_in_linear_domain=None, **solver_kwargs):
     """
@@ -74,10 +75,11 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
         - 'spatial_corr_exp_decay': Use covariance-based whitening W = V^(-1/2) with exponential decay correlation
         - 'log_inv_power_diag': Use diagonal matrix W_jj = log10(1/p_j) based on observed powers
         - 'hetero_diag': Use heteroscedastic diagonal matrix V_kk = sigma_noise^2 + eta^2 * p_k^2
+    - 'hetero_geo_aware': Use geometry-aware covariance V_kl(i) = sigma(i) * K(f_k, f_l) * sigma(j)
     sigma_noise : float, optional
-        Noise floor variance for 'hetero_diag' whitening. Default 1e-13.
+        Noise floor variance for 'hetero_diag' and 'hetero_geo_aware'. Default 1e-13.
     eta : float, optional
-        Scaling factor for signal-dependent variance in 'hetero_diag'. Default 0.5.
+        Scaling factor for signal-dependent variance in 'hetero_diag'/'hetero_geo_aware'. Default 0.5.
     proximity_weight : float, optional
         Strength of soft penalty for transmitters near sensors.
         Penalty weight = 1 + proximity_weight * exp(-dist^2 / (2*decay^2))
@@ -110,6 +112,10 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
     cluster_threshold_fraction : float, optional
         Fraction of max score for candidate inclusion in clustering (e.g., 0.1 = 10%).
         Default: 0.1. Only used when selection_method='cluster'.
+    cluster_max_candidates : int, optional
+        Maximum number of top-scoring candidates to consider for clustering and to 
+        store in history for visualization. Default: 100. This controls both the 
+        clustering candidate pool and how many candidates are plotted at each iteration.
     dedupe_distance_m : float, optional
         Distance threshold in meters for deduplicating transmitters after GLRT iterations.
         Transmitters within this distance of each other are merged, keeping the one
@@ -218,10 +224,39 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
             observed_powers=observed_powers_linear,
             sigma_noise=sigma_noise, eta=eta, verbose=verbose
         )
+    elif whitening_method == 'hetero_geo_aware':
+        if verbose:
+            print("  Using hetero_geo_aware whitening (dynamic covariance)...")
+        # We don't compute a static W here. The solver will handle it dynamically.
+        W = None
+        
+        # Compute geometric features
+        if tirem_config_path is None:
+             # Default fallback if not provided but needed
+             tirem_config_path = 'config/tirem_parameters.yaml'
+
+        if verbose:
+            print(f"  Computing geometric features using TIREM (config: {tirem_config_path})...")
+            
+        from ..propagation.tirem_wrapper import TiremModel
+        # Initialize TIREM model
+        tirem_model = TiremModel(tirem_config_path)
+        
+        # Compute features
+        # Features: (M, N, 4)
+        geometric_features = tirem_model.compute_geometric_features(
+            sensor_locations, map_shape, scale=scale, n_jobs=n_jobs, verbose=verbose
+        )
+        
+        solver_kwargs['geometric_features'] = geometric_features
+        solver_kwargs['whitening_method'] = whitening_method
+        solver_kwargs['sigma_noise'] = sigma_noise
+        solver_kwargs['eta'] = eta
+        
     else:
         raise ValueError(
             f"Unknown whitening_method '{whitening_method}'. "
-            "Choose 'spatial_corr_exp_decay', 'log_inv_power_diag', or 'hetero_diag'"
+            "Choose 'spatial_corr_exp_decay', 'log_inv_power_diag', 'hetero_diag', or 'hetero_geo_aware'"
         )
 
     # Step 4: Build propagation matrix
@@ -289,6 +324,7 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
             scale=scale,
             cluster_distance_m=cluster_distance_m,
             cluster_threshold_fraction=cluster_threshold_fraction,
+            cluster_max_candidates=cluster_max_candidates,
             dedupe_distance_m=dedupe_distance_m,
             verbose=verbose,
             lambda_reg=lambda_reg,

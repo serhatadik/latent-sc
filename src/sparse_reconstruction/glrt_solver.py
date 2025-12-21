@@ -245,14 +245,184 @@ def solve_iterative_glrt(A_model, W, observed_powers,
     # This might be large (M x N), but usually manageable if A_model is manageable.
     # If memory is tight, we can compute columns on the fly.
     # For M=10, N=10000, this is small (100k floats).
-    A_w = W @ A_model
     
-    # Precompute norms of whitened columns: ||W a_i||_2^2
-    # Denominator of GLRT score
-    A_w_norms_sq = np.sum(A_w**2, axis=0)
+    whitening_method = solver_kwargs.get('whitening_method', None)
     
-    # Avoid division by zero
-    A_w_norms_sq[A_w_norms_sq < 1e-20] = 1e-20
+    if whitening_method == 'hetero_geo_aware':
+        # Dynamic Whitening Integration
+        if verbose:
+            print("  Initializing hetero_geo_aware dynamic precomputation...")
+            
+        geometric_features = solver_kwargs.get('geometric_features') # Shape (M, N, 4)
+        if geometric_features is None:
+            raise ValueError("geometric_features required for hetero_geo_aware whitening")
+
+        sigma_noise = solver_kwargs.get('sigma_noise', 1e-13)
+        eta = solver_kwargs.get('eta', 0.5)
+        # Default kernel widths RHO for [LOS, Elev, Obstacles, Dist]
+        # LOS: binary, so small rho < 1 separates 0 and 1. 0.1?
+        # Elev: degrees. 10-20 degrees?
+        # Obs: count. 1-2?
+        # Dist: meters. 100-500m?
+        feature_rho = solver_kwargs.get('feature_rho', [0.1, 15.0, 1.0, 200.0])
+        feature_rho = np.array(feature_rho)
+        
+        # We need to compute GLRT score for each candidate i:
+        # T_i = ( (V_i^-1 a_i)^T r )^2 / ( a_i^T V_i^-1 a_i )
+        # where V_i depends on i
+        
+        # V_i = D_i * C_i * D_i
+        # D_i = diag( sigma(p_k) ) -> Diagonal matrix of std devs
+        # C_i = Kernel matrix between sensors for transmitter i
+        
+        # Since M is small (~6-20), we can loop over N candidates?
+        # Loop over N might be slow in Python if N is large (10k-100k).
+        # We should try to vectorize or use numba/caching if possible.
+        # But V_i^-1 needs to be computed for each i. Inverting M x M matrix N times.
+        # If M=10, N=10000 -> 10000 inversions of 10x10. Very fast.
+        
+        # Let's precompute:
+        # 1. Standard Deviations D(i) for each candidate i
+        #    sigma_k(i) = sqrt(sigma_noise^2 + eta^2 * A_ki^2 * t_ref^2?) 
+        #    Wait, slide says V = diag(sigma_noise^2 + eta^2 p_k^2). 
+        #    What is p_k? It is the signal power from candidate i?
+        #    Usually for GLRT we test if there is a signal.
+        #    The variance model usually assumes the variance depends on the signal strength.
+        #    In the "Add-One" test, we are testing a candidate with unknown amplitude `alpha`.
+        #    But the covariance V is usually assumed fixed or estimated.
+        #    If V depends on the signal we are estimating, it becomes iterative/complex.
+        #    However, the request says: "V = diag(sigma_noise^2 + eta^2 p_k^2)". 
+        #    Is p_k the OBSERVED power or the HYPOTHESIZED power?
+        #    "Slide 15 defines ... based on signal power."
+        #    Usually in this context (hetero_diag option implementation), p_k was the OBSERVED power?
+        #    No, looking at reconstruction.py for hetero_diag:
+        #    `W = compute_whitening_matrix(..., observed_powers=observed_powers_linear)`
+        #    So for hetero_diag, it used observed powers.
+        #    
+        #    BUT, the prompt says: "feature vector ... between transmitter i and receiver k".
+        #    "V_kl(i, g) = sigma^2(i) * K(...)". 
+        #    Wait, "sigma^2(i)"?
+        #    "The final element Sigma_ij of your merged matrix would be: D_ii * C_ij * D_jj"
+        #    "D_ii = sqrt(sigma_noise^2 + eta^2 P_i^2)" where "P_i: The power at sensor i."
+        #    If P_i is the observed power, then D is constant for all candidates!
+        #    "Slide 15 defines the heteroscedastic diagonal elements based on signal power."
+        #    If it's based on observed power, then D is fixed (M x M diagonal).
+        
+        #    Let's assume P_i is the OBSERVED power at sensor i (which drives the noise variance).
+        #    In that case, D is independent of candidate i.
+        #    ONLY C (Correlation) depends on candidate i (geometry).
+        
+        #    So, V_i = D @ C_i @ D.
+        #    Inverse: V_i^-1 = D^-1 @ C_i^-1 @ D^-1.
+        
+        #    This simplifies things!
+        
+        # 1. Compute D and D^-1 (fixed)
+        # observed_powers is linear.
+        obs_var = sigma_noise**2 + (eta * observed_powers)**2
+        D_diag = np.sqrt(obs_var)
+        D_inv_diag = 1.0 / (D_diag + 1e-20)
+        
+        # 2. Precompute V_i inverse components for all i
+        # We need term1[i] = a_i^T V_i^-1
+        # And term2[i] = a_i^T V_i^-1 a_i  (scalar)
+        
+        # To avoid storing (N, M, M) matrices, we can just store what we need.
+        # Actually, for GLRT score we need:
+        # Score_i = ( (V_i^-1 a_i)^T r )^2 / ( a_i^T V_i^-1 a_i )
+        #         = ( r^T V_i^-1 a_i )^2 / ...
+        #         = ( r^T D^-1 C_i^-1 D^-1 a_i )^2 / ( a_i^T D^-1 C_i^-1 D^-1 a_i )
+        
+        # Let's define normalized vectors:
+        # r_norm = D^-1 r
+        # a_i_norm = D^-1 a_i  (vector for candidate i)
+        
+        # Score_i = ( r_norm^T C_i^-1 a_i_norm )^2 / ( a_i_norm^T C_i^-1 a_i_norm )
+        
+        # So we need to compute C_i and its inverse for each i.
+        
+        # Scale D^-1
+        # A_model: (M, N)
+        # r: (M,)
+        
+        D_inv_mat = np.diag(D_inv_diag)
+        A_norm = D_inv_mat @ A_model  # (M, N)
+        r_norm_init = D_inv_mat @ observed_powers # Initial r_norm
+        
+        # We need to function to compute C_i_inv @ vec efficiently?
+        # Since M is small (~10), explicit inversion is fine.
+        
+        # Precompute C_i_inv for all i?
+        # M^2 * N floats. 100 * N. If N=10000 -> 1M floats = 8MB. Cheap.
+        
+        # Compute C_i matrices
+        # features: (M, N, 4) -> Transpose to (N, M, 4) for iteration?
+        features_T = geometric_features.transpose(1, 0, 2) # (N, M, 4)
+        
+        C_inv_storage = np.zeros((N, M, M), dtype=np.float32)
+        
+        # rho for broadcasting: (1, 1, 4)
+        rho_sq = feature_rho**2
+        
+        if verbose:
+             print(f"  Precomputing correlation matrices for {N} candidates...")
+             
+        for i in range(N):
+            # Features for sensors w.r.t candidate i: F_i (M, 4)
+            F_i = features_T[i]
+            
+            # Compute Pairwise distances between rows of F_i (M x M)
+            # Diff: (M, 1, 4) - (1, M, 4) -> (M, M, 4)
+            diff = F_i[:, np.newaxis, :] - F_i[np.newaxis, :, :]
+            
+            # Weighted squared euclidean distance
+            # Sum over features
+            dist_sq = np.sum((diff**2) / rho_sq, axis=2) # (M, M)
+            
+            # Kernel K_ij = exp( - dist_sq / 2 )
+            K = np.exp(-0.5 * dist_sq)
+            
+            # Normalize to Correlation Matrix C
+            # C_ij = K_ij / sqrt(K_ii * K_jj)
+            # But K_ii = exp(0) = 1. So C = K.
+            C = K
+            
+            # Add small jitter for stability
+            C += np.eye(M) * 1e-6
+            
+            # Invert
+            try:
+                # Use cholesky or inv? inv is safer for general C
+                C_inv = np.linalg.inv(C)
+            except np.linalg.LinAlgError:
+                 C_inv = np.linalg.pinv(C)
+                 
+            C_inv_storage[i] = C_inv
+            
+        # Precompute denominators: a_i_norm^T C_i^-1 a_i_norm
+        # A_norm[:, i] is a_i_norm
+        
+        denom_storage = np.zeros(N)
+        for i in range(N):
+            a_vec = A_norm[:, i]
+            # val = a^T C^-1 a
+            val = a_vec @ C_inv_storage[i] @ a_vec
+            denom_storage[i] = val
+            
+        denom_storage[denom_storage < 1e-20] = 1e-20
+        
+        # For the loop, we will use these precomputed terms
+        # A_w, A_w_norms_sq are NOT used in the same way.
+        # We will use A_norm, C_inv_storage, denom_storage.
+        
+        dynamic_whitening = True
+        
+    else:
+        dynamic_whitening = False
+        A_w = W @ A_model
+        A_w_norms_sq = np.sum(A_w**2, axis=0)
+        A_w_norms_sq[A_w_norms_sq < 1e-20] = 1e-20
+
 
     for k in range(1, glrt_max_iter + 1):
         if verbose:
@@ -262,16 +432,61 @@ def solve_iterative_glrt(A_model, W, observed_powers,
         # T_i = ( (W a_i)^T (W r) )^2 / ||W a_i||^2
         #     = ( a_i^w^T r^w )^2 / ||a_i^w||^2
         
-        # Current whitened residual
-        r_w = W @ residual
-        
-        # Numerator: (A_w^T r_w)^2
-        # This is a matrix-vector multiplication: (N x M) @ (M x 1) -> (N x 1)
-        correlations = A_w.T @ r_w
-        numerator = correlations**2
-        
-        # GLRT Scores
-        scores = numerator / A_w_norms_sq
+        if dynamic_whitening:
+             # Dynamic Score Calculation
+             # r_current = residual (in linear power)
+             
+             # r_norm = D^-1 r
+             r_norm = D_inv_mat @ residual
+             
+             # Numerator = ( r_norm^T C_i^-1 a_i_norm )^2
+             # This is tricky because C_i^-1 depends on i.
+             # We need to compute this for all i.
+             # r_norm is (M,)
+             # A_norm is (M, N)
+             # C_inv_storage is (N, M, M)
+             
+             # Vectorized attempt:
+             # Term = sum_j sum_k r_j * (C_inv_i)_jk * A_norm_k,i
+             
+             # Better: Compute vec_i = C_inv_i @ r_norm  -> (N, M)
+             # Then: dot(vec_i, A_norm_i) -> (N,)
+             
+             # Einsum: 'nxy,y->nx' multiply (N,M,M) by (M,) -> (N,M)
+             # C_inv_storage (N, M, M), r_norm (M) -> (N, M)
+             # Requires N ops. C_inv_storage is N x M^2.
+             # MatVec for each N.
+             
+             # weighted_r = np.einsum('nij,j->ni', C_inv_storage, r_norm)
+             # BUT einsum might vary in performance. simple loop or tensordot?
+             # tensordot over 1 axis? No, indices mismatch.
+             # matmul: (N, M, M) @ (N, M, 1)?
+             # r_val = r_norm.reshape(1, M, 1) -> broadcast?
+             # (N, M, M) @ (1, M, 1) -> (N, M, 1)
+             
+             weighted_r_all = np.matmul(C_inv_storage, r_norm) # (N, M)
+             
+             # Now dot with a_i_norm column-wise
+             # A_norm is (M, N). Transpose to (N, M)
+             A_norm_T = A_norm.T # (N, M)
+             
+             # dot product per row
+             correlations = np.sum(weighted_r_all * A_norm_T, axis=1) # (N,)
+             
+             numerator = correlations**2
+             scores = numerator / denom_storage
+             
+        else:
+            # Current whitened residual
+            r_w = W @ residual
+            
+            # Numerator: (A_w^T r_w)^2
+            # This is a matrix-vector multiplication: (N x M) @ (M x 1) -> (N x 1)
+            correlations = A_w.T @ r_w
+            numerator = correlations**2
+            
+            # GLRT Scores
+            scores = numerator / A_w_norms_sq
         
         # Mask out already selected indices
         scores[support] = -1.0
@@ -297,29 +512,44 @@ def solve_iterative_glrt(A_model, W, observed_powers,
             best_idx = np.argmax(scores)
         best_score = scores[best_idx]
         
-        # Store top 10 candidates for visualization
-        # Get indices of top 10 scores
-        if len(scores) >= 10:
-            top_10_indices = np.argpartition(scores, -10)[-10:]
+        # Store top-K candidates for visualization (uses cluster_max_candidates)
+        # This ensures consistency: same number of candidates for clustering and visualization
+        top_k = cluster_max_candidates if cluster_max_candidates and cluster_max_candidates > 0 else 100
+        if len(scores) >= top_k:
+            top_k_indices = np.argpartition(scores, -top_k)[-top_k:]
             # Sort them by score descending
-            top_10_indices = top_10_indices[np.argsort(scores[top_10_indices])[::-1]]
+            top_k_indices = top_k_indices[np.argsort(scores[top_k_indices])[::-1]]
         else:
-            top_10_indices = np.argsort(scores)[::-1]
+            top_k_indices = np.argsort(scores)[::-1]
             
-        top_10_scores = scores[top_10_indices]
+        top_k_scores = scores[top_k_indices]
         
         candidates_history.append({
             'iteration': k,
-            'top_indices': top_10_indices,
-            'top_scores': top_10_scores,
+            'top_indices': top_k_indices,
+            'top_scores': top_k_scores,
             'selected_index': best_idx,
             'selected_score': best_score,
             'cluster_info': cluster_info
         })
         
         # Calculate residual energy for normalization
-        # ||W r||^2 = r^T W^T W r = r_w^T r_w
-        resid_energy = np.sum(r_w**2)
+        if dynamic_whitening:
+             # For dynamic whitening, the metric is slightly ambiguous because W changes.
+             # But usually we normalize by the best candidate's whitening?
+             # Or just the weighted residual energy with respect to the best candidate's covariance?
+             # Let's use the selected best_idx's covariance.
+             if best_idx is not None and best_idx >= 0:
+                 # resid_energy = r^T V_best^-1 r
+                 # = r_norm^T C_best^-1 r_norm
+                 
+                 C_inv_best = C_inv_storage[best_idx]
+                 resid_energy = r_norm @ C_inv_best @ r_norm
+             else:
+                 resid_energy = 1.0 # fallback
+        else:
+            # ||W r||^2 = r^T W^T W r = r_w^T r_w
+            resid_energy = np.sum(r_w**2)
         
         # Normalized score (fraction of energy explained): 0 to 1
         if resid_energy > 1e-20:
@@ -378,8 +608,31 @@ def solve_iterative_glrt(A_model, W, observed_powers,
         # Disable exclusion_mask for sub-problem (already handled in selection)
         kwargs_copy['exclusion_mask'] = None
         
+        # Remove partial whitening parameters that might confuse the sub-solver or scipy
+        for key in ['geometric_features', 'feature_rho', 'whitening_method', 'sigma_noise', 'eta']:
+            kwargs_copy.pop(key, None)
+            
+        W_for_sub = W
+        if dynamic_whitening:
+             # Construct W for the sub-problem based on the most recent candidate (best_idx)
+             # This is an approximation if multiple sources are present, but better than nothing.
+             # V_best^-1 = D^-1 C_best^-1 D^-1
+             # We want W such that W^T W = V^-1
+             # C_best^-1 = L L^T (Cholesky of inverse)
+             # Then V^-1 = D^-1 L L^T D^-1 = (L^T D^-1)^T (L^T D^-1)
+             # So W = L^T D^-1
+             
+             C_inv_best = C_inv_storage[best_idx]
+             try:
+                 L = np.linalg.cholesky(C_inv_best)
+                 W_part = L.T
+                 W_for_sub = W_part @ D_inv_mat
+             except np.linalg.LinAlgError:
+                 # Fallback to diagonal
+                 W_for_sub = D_inv_mat 
+
         t_sub, sub_info = solve_sparse_reconstruction_scipy(
-            A_sub, W, observed_powers, 
+            A_sub, W_for_sub, observed_powers, 
             verbose=False, # Keep it quiet
             **kwargs_copy
         )
@@ -399,7 +652,14 @@ def solve_iterative_glrt(A_model, W, observed_powers,
             # Calculate current error
             # ||W(p - p_hat)||^2 is not exactly what GLRT minimizes (it minimizes log diff),
             # but it's a good metric for the residual power.
-            resid_norm = np.linalg.norm(W @ residual)
+            if dynamic_whitening:
+                 # Use W from best_idx
+                 C_inv_best = C_inv_storage[best_idx]
+                 # r^T V^-1 r = r_norm^T C^-1 r_norm
+                 resid_norm_sq = r_norm @ C_inv_best @ r_norm
+                 resid_norm = np.sqrt(resid_norm_sq)
+            else:
+                 resid_norm = np.linalg.norm(W @ residual)
             print(f"  Residual norm: {resid_norm:.4e}")
 
     # Deduplicate transmitters that are within dedupe_distance_m of each other
@@ -453,10 +713,27 @@ def solve_iterative_glrt(A_model, W, observed_powers,
                 spatial_weights = kwargs_copy.get('spatial_weights', None)
                 if spatial_weights is not None:
                     kwargs_copy['spatial_weights'] = spatial_weights[support]
+                # Disable exclusion_mask for sub-problem (already handled in selection)
                 kwargs_copy['exclusion_mask'] = None
                 
+                # Remove partial whitening parameters for sub-solver
+                for key in ['geometric_features', 'feature_rho', 'whitening_method', 'sigma_noise', 'eta']:
+                    kwargs_copy.pop(key, None)
+                
+                W_for_dedupe = W
+                if dynamic_whitening:
+                    # Use the W from the primary support (first kept one?)
+                    # rough approximation
+                    idx_primary = support[0] if len(support) > 0 else 0
+                    C_inv_best = C_inv_storage[idx_primary]
+                    try:
+                        L = np.linalg.cholesky(C_inv_best)
+                        W_for_dedupe = L.T @ D_inv_mat
+                    except np.linalg.LinAlgError:
+                        W_for_dedupe = D_inv_mat
+
                 t_sub, _ = solve_sparse_reconstruction_scipy(
-                    A_sub, W, observed_powers,
+                    A_sub, W_for_dedupe, observed_powers,
                     verbose=False,
                     **kwargs_copy
                 )

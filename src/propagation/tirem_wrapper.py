@@ -254,3 +254,223 @@ class TiremModel(PropagationModel):
             print(f"Warning: Failed to save cache: {e}")
                 
         return A_model
+
+    def compute_geometric_features(self, sensor_locations, map_shape, scale=1.0, n_jobs=-1, verbose=True):
+        """
+        Compute geometric features for all pairs of (sensor, grid_point).
+        
+        Features:
+        0. Check for LOS (binary)
+        1. Shadowing Angle (degrees) - angle of shadow from obstacle closest to Rx (0 if LOS)
+        2. Number of obstacles (count)
+        3. Distance (meters)
+        
+        Returns
+        -------
+        features : ndarray of shape (M, N, 4)
+        """
+        import hashlib
+        import json
+        
+        # Define cache directory
+        CACHE_DIR = Path("../data/cache/tirem")
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        
+        cache_params = {
+            'sensor_locations': sensor_locations.tolist() if isinstance(sensor_locations, np.ndarray) else sensor_locations,
+            'map_shape': list(map_shape),
+            'scale': float(scale),
+            'tirem_config': self.config,
+            'map_path': str(self.map_path),
+            'type': 'geometric_features'
+        }
+        
+        cache_string = json.dumps(cache_params, sort_keys=True)
+        cache_hash = hashlib.md5(cache_string.encode('utf-8')).hexdigest()
+        cache_file = CACHE_DIR / f"tirem_features_{cache_hash}.npy"
+        
+        if cache_file.exists():
+            if verbose:
+                print(f"Loading cached feature tensor from: {cache_file}")
+            try:
+                return np.load(cache_file)
+            except Exception as e:
+                print(f"Failed to load cache: {e}. Recomputing...")
+        
+        M = len(sensor_locations)
+        height, width = map_shape
+        N = height * width
+        n_features = 4  # LOS, Elev, Obstacles, Dist
+        
+        if verbose:
+            print(f"Computing geometric features: {M} sensors × {N} grid points × {n_features} features")
+            
+        features = np.zeros((M, N, n_features), dtype=np.float32)
+        
+        params = Params(
+            bs_endpoint_name="dummy", bs_is_tx=1,
+            txheight=self.tx_height, rxheight=self.rx_height,
+            bs_lon=0, bs_lat=0, bs_x=0, bs_y=0,
+            freq=self.freq, polarz=self.polarz, generate_features=0,
+            map_type="fusion", map_filedir=self.map_path,
+            gain=0, first_call=0, extsn=0,
+            refrac=self.refrac, conduc=self.conduc, permit=self.permit, humid=self.humid,
+            side_len=scale, sampling_interval=0.5
+        )
+        sampling_interval = 0.5
+        
+        from scipy.ndimage import zoom
+        orig_height, orig_width = self.elev_map.shape
+        target_height, target_width = map_shape
+        if (orig_height, orig_width) != (target_height, target_width):
+            if verbose:
+                print(f"Resizing TIREM map from {self.elev_map.shape} to {map_shape}...")
+            current_elev_map = zoom(self.elev_map, (target_height / orig_height, target_width / orig_width), order=1)
+        else:
+            current_elev_map = self.elev_map
+            
+        current_side_len = scale
+        
+        for j, sensor in enumerate(sensor_locations):
+            rx_col, rx_row = sensor
+            rx_loc = np.array([rx_col, rx_row])
+            
+            all_indices = np.arange(N)
+            n_workers = n_jobs if n_jobs > 0 else cpu_count()
+            # More computation per chunk for features, so slightly smaller chunks might be better?
+            # Or same logic. Stick to same logic.
+            n_chunks = max(n_workers * 4, 16)
+            chunks = np.array_split(all_indices, n_chunks)
+            
+            if verbose and j == 0:
+                print(f"  Parallelizing with {n_workers} workers...")
+            
+            results_list = Parallel(n_jobs=n_jobs)(
+                delayed(_compute_features_chunk)(
+                    chunk, width, rx_loc, current_side_len, sampling_interval, current_elev_map, params
+                ) for chunk in chunks
+            )
+            
+            for res in results_list:
+                for idx, feats in res:
+                    features[j, idx, :] = feats
+                    
+            if verbose and (j + 1) % max(1, M // 10) == 0:
+                print(f"  Processed {j+1}/{M} sensors...")
+                
+        if verbose:
+            print(f"Saving features to cache: {cache_file}")
+        try:
+            np.save(cache_file, features)
+        except Exception as e:
+            print(f"Warning: Failed to save cache: {e}")
+            
+        return features
+
+
+def _compute_features_chunk(indices, width, rx_loc, current_side_len, sampling_interval, current_elev_map, params):
+    """
+    Compute geometric features for a chunk of grid points.
+    Returns list of (index, [los, elevation, obstacles, distance])
+    """
+    import math
+    results = []
+    
+    # Pre-extract params
+    tx_height = params.txheight
+    rx_height = params.rxheight
+    
+    for i in indices:
+        row = i // width
+        col = i % width
+        tx_loc = np.array([col, row]) # Grid coordinates (0-indexed)
+        
+        # Distance check
+        dist_px = np.linalg.norm(rx_loc - tx_loc)
+        if dist_px < 0.5:
+             # Coincident: LOS=1, Elev=0, Obs=0, Dist=0
+             results.append((i, np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)))
+             continue
+             
+        # Build profile (1-based indexing for build_arrays)
+        d_array, e_array = build_arrays(
+            current_side_len, 
+            sampling_interval, 
+            tx_loc + 1, 
+            rx_loc + 1, 
+            current_elev_map
+        )
+        
+        # Logic from main_tirem_pred.py
+        # Filter non-zero elevation points if any? build_arrays returns full path.
+        # It's better to use all points returned.
+        
+        # d_array is distances from Tx along path
+        # e_array is terrain elevation
+        
+        if len(d_array) < 2:
+            results.append((i, np.array([1.0, 0.0, 0.0, d_array[-1] if len(d_array)>0 else 0.0], dtype=np.float32)))
+            continue
+
+        # Heights
+        # Careful: e_array includes terrain elevation. 
+        # e_array[0] approx tx_elevation, e_array[-1] approx rx_elevation
+        tx_terrain = e_array[0]
+        rx_terrain = e_array[-1]
+        
+        tx_total_height = tx_terrain + tx_height
+        rx_total_height = rx_terrain + rx_height
+        
+        total_dist = d_array[-1]
+        if total_dist == 0:
+             results.append((i, np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)))
+             continue
+
+        # Slope for LOS line
+        slope = (rx_total_height - tx_total_height) / total_dist
+        
+        # Obstacles
+        num_obstacles = 0.0
+        # Check all intermediate points
+        # LOS line height at distance d: h(d) = tx_total_height + slope * d
+        # Terrain height at distance d: e_array
+        # Obstacle if h(d) < e_array[i]
+        
+        # Vectorized check
+        los_line_heights = tx_total_height + slope * d_array
+        # Typically endpoints are LOS (antenna above ground), so check internals
+        # But allow endpoints to be checked if antenna is burried (unlikely)
+        # main_tirem_pred checks range(len - 1)
+        
+        # obstacles = (los_line_heights < e_array)
+        # num_obstacles = np.sum(obstacles)
+        
+        # Refined check (ignoring start/end or very close to it to avoid artifacts)
+        # Just check everything strictly
+        obstacles_mask = los_line_heights < (e_array - 0.01) # Small epsilon
+        num_obstacles = np.sum(obstacles_mask)
+        
+        is_los = 1.0 if num_obstacles == 0 else 0.0
+        
+        # Shadowing Angle for the obstacle closest to the receiver
+        # Reference: main_tirem_pred.py line 357
+        # If LOS (no obstacles), shadowing_angle = 0
+        shadowing_angle = 0.0
+        if num_obstacles > 0:
+            # Find the last obstacle (closest to Rx) by traversing backwards from Rx
+            for k in range(len(d_array) - 2, 0, -1):  # Skip endpoints
+                if obstacles_mask[k]:
+                    # Found the last obstacle (closest to Rx)
+                    ke_height = e_array[k]
+                    ke_dist = d_array[k]
+                    dist_ke_to_rx = total_dist - ke_dist
+                    if dist_ke_to_rx > 0.01:
+                        # Angle from Rx looking up to the knife edge top
+                        angle_rx_to_ke = math.degrees(math.atan((ke_height - rx_total_height) / dist_ke_to_rx))
+                        # Add the slope angle (original LOS direction)
+                        shadowing_angle = angle_rx_to_ke + math.degrees(math.atan(slope))
+                    break
+        
+        results.append((i, np.array([is_los, shadowing_angle, num_obstacles, total_dist], dtype=np.float32)))
+        
+    return results
