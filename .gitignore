@@ -34,6 +34,9 @@ data/results/
 *.npy
 *.npz
 
+config/monitoring_locations*
+results/
+
 # IDEs
 .vscode/
 .idea/
@@ -65,3 +68,7 @@ legacy/*.ipynb
 *.tmp
 *.bak
 *.backup
+
+# TIREM binaries and headers
+src/tirem/*.dll
+src/tirem/*.h
