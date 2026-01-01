@@ -81,9 +81,10 @@ class TiremModel(PropagationModel):
             if not map_path.exists():
                 # Try relative to CWD
                 map_path = Path.cwd() / map_file
-            self.map_path = str(map_path)
+            # ALWAYS resolve to absolute path to ensure consistency across execution contexts
+            self.map_path = str(map_path.resolve())
         else:
-            self.map_path = map_file
+            self.map_path = str(Path(map_file).resolve())
             
         self._load_map()
         
@@ -118,8 +119,10 @@ class TiremModel(PropagationModel):
         import hashlib
         import json
         
-        # Define cache directory
-        CACHE_DIR = Path("../data/cache/tirem")
+        # Define cache directory - use absolute path based on this file's location
+        _THIS_DIR = Path(__file__).parent.resolve()
+        _PROJECT_ROOT = _THIS_DIR.parent.parent
+        CACHE_DIR = _PROJECT_ROOT / "data" / "cache" / "tirem"
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
         # Create a unique cache key based on all parameters that affect the result
@@ -142,6 +145,45 @@ class TiremModel(PropagationModel):
         
         cache_file = CACHE_DIR / f"tirem_prop_matrix_{cache_hash}.npy"
         
+        # --- Legacy Fallback Logic ---
+        # If the canonical (absolute path) cache doesn't exist, check for the legacy (relative path) cache
+        # This handles the case where the notebook created a cache using a relative path string
+        if not cache_file.exists():
+            if verbose:
+                print(f"Canonical cache not found. Checking legacy cache...")
+            
+            # Construct legacy map_path (simulating notebook environment)
+            # Notebook uses '../config/tirem_parameters.yaml', so map path resolution
+            # results in '..\SLCmap_5May2022.mat' (on Windows)
+            # We assume the map file is in the parent of the config parent, or similar.
+            # Heuristic: try to reconstruct the relative path string that likely generated the legacy cache
+            try:
+                # Assuming standard structure where map is in project root
+                # and notebook runs from notebooks/
+                legacy_map_path = str(Path('..') / Path(self.map_path).name)
+                
+                legacy_params = cache_params.copy()
+                legacy_params['map_path'] = legacy_map_path
+                
+                legacy_string = json.dumps(legacy_params, sort_keys=True)
+                legacy_hash = hashlib.md5(legacy_string.encode('utf-8')).hexdigest()
+                legacy_file = CACHE_DIR / f"tirem_prop_matrix_{legacy_hash}.npy"
+                
+                if legacy_file.exists():
+                    if verbose:
+                        print(f"✓ Found legacy cache: {legacy_file}")
+                        print(f"Migrating to canonical location: {cache_file}")
+                    
+                    try:
+                        data = np.load(legacy_file)
+                        # Save to canonical location for future use
+                        np.save(cache_file, data)
+                        return data
+                    except Exception as e:
+                        print(f"Failed to migrate legacy cache: {e}")
+            except Exception as e:
+                print(f"Error checking legacy cache: {e}")
+
         if cache_file.exists():
             if verbose:
                 print(f"Loading cached propagation matrix from: {cache_file}")
@@ -272,8 +314,10 @@ class TiremModel(PropagationModel):
         import hashlib
         import json
         
-        # Define cache directory
-        CACHE_DIR = Path("../data/cache/tirem")
+        # Define cache directory - use absolute path based on this file's location
+        _THIS_DIR = Path(__file__).parent.resolve()
+        _PROJECT_ROOT = _THIS_DIR.parent.parent
+        CACHE_DIR = _PROJECT_ROOT / "data" / "cache" / "tirem"
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         
         cache_params = {
@@ -288,6 +332,35 @@ class TiremModel(PropagationModel):
         cache_string = json.dumps(cache_params, sort_keys=True)
         cache_hash = hashlib.md5(cache_string.encode('utf-8')).hexdigest()
         cache_file = CACHE_DIR / f"tirem_features_{cache_hash}.npy"
+        
+        # --- Legacy Fallback Logic ---
+        if not cache_file.exists():
+            if verbose:
+                print(f"Canonical cache not found. Checking legacy cache...")
+            
+            try:
+                legacy_map_path = str(Path('..') / Path(self.map_path).name)
+                
+                legacy_params = cache_params.copy()
+                legacy_params['map_path'] = legacy_map_path
+                
+                legacy_string = json.dumps(legacy_params, sort_keys=True)
+                legacy_hash = hashlib.md5(legacy_string.encode('utf-8')).hexdigest()
+                legacy_file = CACHE_DIR / f"tirem_features_{legacy_hash}.npy"
+                
+                if legacy_file.exists():
+                    if verbose:
+                        print(f"✓ Found legacy cache: {legacy_file}")
+                        print(f"Migrating to canonical location: {cache_file}")
+                    
+                    try:
+                        data = np.load(legacy_file)
+                        np.save(cache_file, data)
+                        return data
+                    except Exception as e:
+                        print(f"Failed to migrate legacy cache: {e}")
+            except Exception as e:
+                print(f"Error checking legacy cache: {e}")
         
         if cache_file.exists():
             if verbose:
