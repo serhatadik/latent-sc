@@ -266,9 +266,18 @@ def run_investigation(transmitters, seed=None, test_mode=False, output_dir=None,
                 if 'solver_info' in info and 'support' in info['solver_info']:
                     support_indices = info['solver_info']['support']
                     height, width = map_data['shape']
-                    est_rows = [idx // width for idx in support_indices]
-                    est_cols = [idx % width for idx in support_indices]
-                    est_locs_pixels = np.column_stack((est_cols, est_rows))
+                    
+                    # Filter out transmitters with power below -190 dBm
+                    valid_indices = []
+                    for idx in support_indices:
+                        r, c = idx // width, idx % width
+                        power_dbm = tx_map[r, c]
+                        if power_dbm > -190:
+                            valid_indices.append(idx)
+                    
+                    est_rows = [idx // width for idx in valid_indices]
+                    est_cols = [idx % width for idx in valid_indices]
+                    est_locs_pixels = np.column_stack((est_cols, est_rows)) if valid_indices else np.empty((0, 2))
                 else:
                     # Fallback: extract from map
                     from src.evaluation.metrics import extract_locations_from_map
