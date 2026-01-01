@@ -512,27 +512,6 @@ def solve_iterative_glrt(A_model, W, observed_powers,
             best_idx = np.argmax(scores)
         best_score = scores[best_idx]
         
-        # Store top-K candidates for visualization (uses cluster_max_candidates)
-        # This ensures consistency: same number of candidates for clustering and visualization
-        top_k = cluster_max_candidates if cluster_max_candidates and cluster_max_candidates > 0 else 100
-        if len(scores) >= top_k:
-            top_k_indices = np.argpartition(scores, -top_k)[-top_k:]
-            # Sort them by score descending
-            top_k_indices = top_k_indices[np.argsort(scores[top_k_indices])[::-1]]
-        else:
-            top_k_indices = np.argsort(scores)[::-1]
-            
-        top_k_scores = scores[top_k_indices]
-        
-        candidates_history.append({
-            'iteration': k,
-            'top_indices': top_k_indices,
-            'top_scores': top_k_scores,
-            'selected_index': best_idx,
-            'selected_score': best_score,
-            'cluster_info': cluster_info
-        })
-        
         # Calculate residual energy for normalization
         if dynamic_whitening:
              # For dynamic whitening, the metric is slightly ambiguous because W changes.
@@ -556,7 +535,29 @@ def solve_iterative_glrt(A_model, W, observed_powers,
             best_score_norm = best_score / resid_energy
         else:
             best_score_norm = 0.0
-        
+
+        # Calculate Corrected Score for hetero_geo_aware
+        geo_aware_score = 0.0
+        normalized_val_for_history = best_score_norm # Default to R^2
+
+        if whitening_method == 'hetero_geo_aware':
+            # The raw GLRT score is scaled by the inverse correlation matrix C^-1.
+            # If C has small eigenvalues (high correlation), C^-1 has large entries, inflating the score.
+            # We normalize by the mean diagonal element of C^-1 (average amplification) 
+            # to bring the score back to a scale comparable to the diagonal case.
+            
+            C_inv_best = C_inv_storage[best_idx]
+            amplification = np.mean(np.diag(C_inv_best))
+            if amplification < 1e-6:
+                amplification = 1.0
+                
+            geo_aware_score = best_score / amplification
+            normalized_val_for_history = geo_aware_score
+            
+            if verbose:
+                print(f"  Covariance Amplification: {amplification:.2e}")
+                print(f"  Geo-Aware Corrected Score: {geo_aware_score:.4e}")
+
         if verbose:
             print(f"  Best candidate: Index {best_idx}")
             print(f"  Raw Score: {best_score:.4e}")
@@ -564,15 +565,42 @@ def solve_iterative_glrt(A_model, W, observed_powers,
             if cluster_info is not None:
                 print(f"  Selection method: {cluster_info['method']}")
                 print(f"  Clusters found: {cluster_info['n_clusters']}, Selected cluster size: {cluster_info['cluster_size']}")
+
+        # Store top-K candidates for visualization (uses cluster_max_candidates)
+        # This ensures consistency: same number of candidates for clustering and visualization
+        top_k = cluster_max_candidates if cluster_max_candidates and cluster_max_candidates > 0 else 100
+        if len(scores) >= top_k:
+            top_k_indices = np.argpartition(scores, -top_k)[-top_k:]
+            # Sort them by score descending
+            top_k_indices = top_k_indices[np.argsort(scores[top_k_indices])[::-1]]
+        else:
+            top_k_indices = np.argsort(scores)[::-1]
             
+        top_k_scores = scores[top_k_indices]
+        
+        candidates_history.append({
+            'iteration': k,
+            'top_indices': top_k_indices,
+            'top_scores': top_k_scores,
+            'selected_index': best_idx,
+            'selected_score': best_score,
+            'normalized_score': normalized_val_for_history,
+            'cluster_info': cluster_info
+        })
+        
         # 3. Test threshold
-        # If threshold > 1.0, we assume it's a raw score threshold (e.g. 4.0)
-        # If threshold <= 1.0, we assume it's a normalized score threshold (R^2)
-        score_to_check = best_score if glrt_threshold > 1.0 else best_score_norm
+        # If whitening_method is hetero_geo_aware, use corrected score
+        if whitening_method == 'hetero_geo_aware':
+             score_to_check = geo_aware_score
+        else:
+            # Traditional logic for other methods
+            # If threshold > 1.0, we assume it's a raw score threshold (e.g. 4.0)
+            # If threshold <= 1.0, we assume it's a normalized score threshold (R^2)
+            score_to_check = best_score if glrt_threshold > 1.0 else best_score_norm
         
         if score_to_check < glrt_threshold:
             if verbose:
-                print(f"  Normalized score below threshold ({glrt_threshold:.2e}). Stopping.")
+                print(f"  Score ({score_to_check:.4e}) below threshold ({glrt_threshold:.2e}). Stopping.")
             break
             
         # 4. Update support
@@ -744,6 +772,7 @@ def solve_iterative_glrt(A_model, W, observed_powers,
     # Final info
     info = {
         'solver_used': 'glrt',
+        'whitening_method': whitening_method,
         'selection_method': selection_method,
         'n_iter': k,
         'n_nonzero': len(support),
