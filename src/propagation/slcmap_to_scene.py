@@ -171,22 +171,39 @@ class SLCMapToScene:
         
         return x, y
         
-    def generate_terrain_mesh(self) -> str:
+    def generate_terrain_mesh(self, include_buildings: bool = True) -> str:
         """
-        Generate triangulated terrain mesh from DEM.
+        Generate triangulated terrain mesh from elevation data.
         
-        Creates two triangles per grid cell:
-        - Triangle 1: (i,j) → (i+1,j) → (i,j+1)
-        - Triangle 2: (i+1,j) → (i+1,j+1) → (i,j+1)
+        By default, this generates a COMBINED elevation mesh (DEM + building heights)
+        which matches exactly what TIREM uses for its terrain model:
+            elev_map = dem + 0.3048 * hybrid_bldg
+        
+        Creates two triangles per grid cell for a smooth heightfield surface.
+        
+        Parameters
+        ----------
+        include_buildings : bool, optional
+            If True (default), include building heights in elevation.
+            This produces a mesh matching TIREM's terrain representation.
+            If False, only use raw DEM terrain.
         
         Returns
         -------
         str
             Path to the exported terrain PLY file
         """
-        print("[INFO] Generating terrain mesh...")
+        if include_buildings:
+            print("[INFO] Generating combined elevation mesh (DEM + buildings)...")
+            # Use combined elevation - EXACTLY matching TIREM's approach
+            elevation = self.dem + self.buildings
+            mesh_name = "terrain_combined.ply"
+        else:
+            print("[INFO] Generating terrain mesh (DEM only)...")
+            elevation = self.dem
+            mesh_name = "terrain.ply"
         
-        height, width = self.dem.shape
+        height, width = elevation.shape
         
         # Generate vertex coordinates
         rows, cols = np.meshgrid(np.arange(height), np.arange(width), indexing='ij')
@@ -194,7 +211,7 @@ class SLCMapToScene:
         # Convert to local coordinates
         x = self.axis[0] + cols * self.cellsize - self.center_x
         y = self.axis[2] + rows * self.cellsize - self.center_y
-        z = self.dem
+        z = elevation  # Use combined or DEM-only elevation
         
         # Flatten for vertex array
         x_flat = x.flatten()
@@ -210,8 +227,6 @@ class SLCMapToScene:
         )
         
         # Generate faces (triangles)
-        # For each cell (i,j) with corners at indices:
-        #   (i*width + j), (i*width + j+1), ((i+1)*width + j), ((i+1)*width + j+1)
         faces_list = []
         
         for i in range(height - 1):
@@ -235,90 +250,166 @@ class SLCMapToScene:
         )
         
         # Export PLY
-        terrain_path = self.meshes_dir / "terrain.ply"
+        terrain_path = self.meshes_dir / mesh_name
         vertex_element = PlyElement.describe(vertex_data, 'vertex')
         face_element = PlyElement.describe(faces_data, 'face')
         plydata = PlyData([vertex_element, face_element])
         plydata.write(str(terrain_path))
         
-        print(f"[INFO] Terrain mesh: {len(vertices)} vertices, {len(faces)} faces")
+        z_range = f"[{z.min():.1f}, {z.max():.1f}]"
+        print(f"[INFO] Elevation mesh: {len(vertices)} vertices, {len(faces)} faces")
+        print(f"[INFO] Elevation range: {z_range} m")
         print(f"[INFO] Saved to: {terrain_path}")
         
         return str(terrain_path)
         
     def generate_building_meshes(self) -> Dict[str, str]:
         """
-        Generate building meshes using grid-based extrusion.
+        Generate building meshes by extracting components from the combined heightfield.
         
-        Each building cell becomes a box from terrain height to terrain + building height.
-        Adjacent cells with buildings are merged into connected components for efficiency.
+        This method identifies connected components of building pixels and generates
+        a mesh for each component using the EXACT geometry of the combined elevation
+        grid (DEM + Buildings). This ensures perfect alignment with TIREM's view
+        of the data, while separating buildings into individual objects for
+        material assignment.
+        
+        The "walls" of the buildings are formed by the slope between building pixels
+        and the surrounding terrain pixels (which matches the raster interpolation).
         
         Returns
         -------
         dict
             Mapping of building IDs to PLY file paths
         """
-        print("[INFO] Generating building meshes...")
+        print("[INFO] Generating building meshes (heightfield-based)...")
         
-        height, width = self.dem.shape
+        from scipy import ndimage
+        
+        # Identify building pixels
         building_mask = self.buildings > self.building_height_threshold
         
         # Label connected components
-        from scipy import ndimage
         labeled_array, num_features = ndimage.label(building_mask)
+        # Get bounding boxes for efficiency
+        objects = ndimage.find_objects(labeled_array)
         
         print(f"[INFO] Found {num_features} building clusters")
         
         building_paths = {}
         
-        for building_id in range(1, num_features + 1):
-            # Get cells for this building
-            cells = np.argwhere(labeled_array == building_id)
-            
-            if len(cells) == 0:
+        for building_id, slices in enumerate(objects, start=1):
+            if slices is None:
                 continue
                 
-            # Create meshes for each cell and combine
-            cell_meshes = []
+            # Expand slice by 1 pixel to include the "ramp" (wall) down to terrain
+            # Be careful with boundaries
+            y_slice, x_slice = slices
             
-            for row, col in cells:
-                # Get local coordinates for cell corners
-                x0 = self.axis[0] + col * self.cellsize - self.center_x
-                y0 = self.axis[2] + row * self.cellsize - self.center_y
-                x1 = x0 + self.cellsize
-                y1 = y0 + self.cellsize
+            y_start = max(0, y_slice.start - 1)
+            y_stop = min(self.dem.shape[0], y_slice.stop + 1)
+            x_start = max(0, x_slice.start - 1)
+            x_stop = min(self.dem.shape[1], x_slice.stop + 1)
+            
+            # Extract sub-grids
+            sub_dem = self.dem[y_start:y_stop, x_start:x_stop]
+            sub_bldg = self.buildings[y_start:y_stop, x_start:x_stop]
+            sub_mask = (labeled_array[y_start:y_stop, x_start:x_stop] == building_id)
+            
+            # Use combined elevation for vertices
+            sub_elevation = sub_dem + sub_bldg
+            
+            h, w = sub_elevation.shape
+            if h < 2 or w < 2:
+                continue
                 
-                # Heights
-                z_ground = self.dem[row, col]
-                z_roof = z_ground + self.buildings[row, col]
+            # Create local vertices
+            # Note: We need to use absolute coordinates to match scene
+            rows, cols = np.meshgrid(np.arange(h), np.arange(w), indexing='ij')
+            
+            # Map local implementation indices to global indices
+            global_rows = rows + y_start
+            global_cols = cols + x_start
+            
+            # Convert to scene coordinates
+            x = self.axis[0] + global_cols * self.cellsize - self.center_x
+            y = self.axis[2] + global_rows * self.cellsize - self.center_y
+            z = sub_elevation
+            
+            vertices = np.column_stack([x.flatten(), y.flatten(), z.flatten()])
+            
+            vertex_data = np.array(
+                [tuple(v) for v in vertices],
+                dtype=[('x', 'f4'), ('y', 'f4'), ('z', 'f4')]
+            )
+            
+            # Generate faces
+            # Only keep faces that involve at least one building pixel
+            # A face (quad) is formed by (i,j), (i+1,j), (i,j+1), (i+1,j+1)
+            # Check mask at these corners
+            
+            mask_flat = sub_mask.flatten()
+            
+            faces_list = []
+            
+            # Vectorized face generation for this patch
+            # Top-left indices of quads
+            r_idx = np.arange(h - 1)
+            c_idx = np.arange(w - 1)
+            R, C = np.meshgrid(r_idx, c_idx, indexing='ij')
+            
+            idx00 = R * w + C
+            idx01 = R * w + (C + 1)
+            idx10 = (R + 1) * w + C
+            idx11 = (R + 1) * w + (C + 1)
+            
+            # Check if any vertex in the quad belongs to the building
+            # We treat the quad as part of the building if ANY vertex is part of the component
+            # This ensures the "ramp" is included.
+            v00_mask = mask_flat[idx00]
+            v01_mask = mask_flat[idx01]
+            v10_mask = mask_flat[idx10]
+            v11_mask = mask_flat[idx11]
+            
+            quad_mask = v00_mask | v01_mask | v10_mask | v11_mask
+            
+            # Extract valid quads
+            valid_idx00 = idx00[quad_mask]
+            valid_idx01 = idx01[quad_mask]
+            valid_idx10 = idx10[quad_mask]
+            valid_idx11 = idx11[quad_mask]
+            
+            # Create two triangles per quad
+            # Tri 1: 00, 10, 01
+            t1 = np.column_stack([valid_idx00, valid_idx10, valid_idx01])
+            # Tri 2: 10, 11, 01
+            t2 = np.column_stack([valid_idx10, valid_idx11, valid_idx01])
+            
+            faces = np.vstack([t1, t2])
+            
+            if len(faces) == 0:
+                continue
                 
-                # Create box mesh for this cell
-                box = trimesh.creation.box(
-                    extents=[self.cellsize, self.cellsize, self.buildings[row, col]],
-                    transform=trimesh.transformations.translation_matrix([
-                        (x0 + x1) / 2,
-                        (y0 + y1) / 2,
-                        (z_ground + z_roof) / 2
-                    ])
-                )
-                cell_meshes.append(box)
-                
-            # Combine all cells for this building
-            if len(cell_meshes) == 1:
-                combined = cell_meshes[0]
-            else:
-                combined = trimesh.util.concatenate(cell_meshes)
-                
-            # Export PLY
+            faces_data = np.array(
+                [(face,) for face in faces],
+                dtype=[('vertex_indices', 'i4', (3,))]
+            )
+            
+            # Export
             ply_path = self.meshes_dir / f"building_{building_id}.ply"
-            combined.export(str(ply_path), file_type='ply')
+            
+            vertex_element = PlyElement.describe(vertex_data, 'vertex')
+            face_element = PlyElement.describe(faces_data, 'face')
+            
+            # Because PlyData writes are slow for many small files, we trust the OS buffer
+            plydata = PlyData([vertex_element, face_element])
+            plydata.write(str(ply_path))
+            
             building_paths[f"building_{building_id}"] = str(ply_path)
             
         print(f"[INFO] Generated {len(building_paths)} building meshes")
-        
         return building_paths
         
-    def export_to_mitsuba_xml(self, filename: str = "scene.xml") -> str:
+    def export_to_mitsuba_xml(self, filename: str = "scene.xml", separate_buildings: bool = True) -> str:
         """
         Export complete scene to Mitsuba 3 XML format.
         
@@ -326,6 +417,11 @@ class SLCMapToScene:
         ----------
         filename : str
             Name of the XML file (saved in output_dir)
+        separate_buildings : bool, optional
+            If True (default), generate separate meshes for terrain and buildings.
+            This uses the heightfield extraction method to preserve exact geometry
+            while allowing different materials.
+            If False, generate a single combined elevation mesh (one object).
             
         Returns
         -------
@@ -334,18 +430,28 @@ class SLCMapToScene:
         """
         print("[INFO] Exporting to Mitsuba XML...")
         
-        # Generate all meshes
-        terrain_path = self.generate_terrain_mesh()
-        building_paths = self.generate_building_meshes()
+        if separate_buildings:
+            # Separate building and terrain extraction
+            # Terrain: Pure DEM (flattened ground under buildings is fine, 
+            # buildings will sit on top/cover it)
+            terrain_path = self.generate_terrain_mesh(include_buildings=False)
+            building_paths = self.generate_building_meshes()
+        else:
+            # Single combined elevation mesh
+            terrain_path = self.generate_terrain_mesh(include_buildings=True)
+            building_paths = {}
+        
+        # Get terrain mesh filename
+        terrain_filename = Path(terrain_path).name
         
         # Build XML content
         xml_lines = [
             '<?xml version="1.0" encoding="utf-8"?>',
             '<scene version="2.1.0">',
             '',
-            '  <!-- Terrain -->',
+            '  <!-- Combined Elevation Surface (DEM + Buildings) -->',
             f'  <shape type="ply" id="terrain-{self.terrain_material}">',
-            f'    <string name="filename" value="meshes/terrain.ply"/>',
+            f'    <string name="filename" value="meshes/{terrain_filename}"/>',
             f'    <bsdf type="diffuse" id="{self.terrain_material}">',
             '      <rgb name="reflectance" value="0.5, 0.5, 0.5"/>',
             '    </bsdf>',
@@ -353,21 +459,21 @@ class SLCMapToScene:
             '',
         ]
         
-        # Add buildings
-        for building_name, ply_path in building_paths.items():
-            ply_filename = Path(ply_path).name
-            # Alternate between wall and roof materials for variety
-            material = self.building_wall_material
-            xml_lines.extend([
-                f'  <!-- {building_name} -->',
-                f'  <shape type="ply" id="{building_name}-{material}">',
-                f'    <string name="filename" value="meshes/{ply_filename}"/>',
-                f'    <bsdf type="diffuse" id="{material}">',
-                '      <rgb name="reflectance" value="0.4, 0.4, 0.4"/>',
-                '    </bsdf>',
-                '  </shape>',
-                '',
-            ])
+        # Add separate buildings only if requested
+        if separate_buildings:
+            for building_name, ply_path in building_paths.items():
+                ply_filename = Path(ply_path).name
+                material = self.building_wall_material
+                xml_lines.extend([
+                    f'  <!-- {building_name} -->',
+                    f'  <shape type="ply" id="{building_name}-{material}">',
+                    f'    <string name="filename" value="meshes/{ply_filename}"/>',
+                    f'    <bsdf type="diffuse" id="{material}">',
+                    '      <rgb name="reflectance" value="0.4, 0.4, 0.4"/>',
+                    '    </bsdf>',
+                    '  </shape>',
+                    '',
+                ])
             
         xml_lines.append('</scene>')
         
@@ -376,6 +482,7 @@ class SLCMapToScene:
         with open(xml_path, 'w', encoding='utf-8') as f:
             f.write('\n'.join(xml_lines))
             
+        n_objects = 1 + len(building_paths)
         print(f"[INFO] Scene exported to: {xml_path}")
         print(f"[INFO] Total objects: {1 + len(building_paths)} (1 terrain + {len(building_paths)} buildings)")
         
