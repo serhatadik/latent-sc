@@ -96,9 +96,13 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
     return_linear_scale : bool, optional
         Return power field in linear scale (mW), default: False (return dBm)
     model_type : str, optional
-        Propagation model to use: 'log_distance' (default) or 'tirem'
+        Propagation model to use:
+        - 'log_distance': Simple log-distance path loss model (default)
+        - 'tirem': TIREM terrain-aware propagation model
+        - 'raytracing': Sionna ray-tracing propagation model
     tirem_config_path : str, optional
-        Path to TIREM configuration file (required if model_type='tirem')
+        Path to propagation model configuration file.
+        Required for model_type='tirem' (TIREM config) or 'raytracing' (Sionna config).
     n_jobs : int, optional
         Number of parallel jobs for TIREM computation, default: -1
     selection_method : {'max', 'cluster'}, optional

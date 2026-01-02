@@ -62,8 +62,20 @@ def compute_propagation_matrix(sensor_locations, map_shape, scale=1.0,
             config_path = 'config/tirem_parameters.yaml'
         model = TiremModel(config_path)
         return model.compute_propagation_matrix(sensor_locations, map_shape, scale=scale, n_jobs=n_jobs, verbose=verbose)
+    elif model_type == 'raytracing':
+        # Sionna ray-tracing model
+        from src.propagation import SionnaModel
+        if SionnaModel is None:
+            raise ImportError(
+                "Sionna is required for raytracing model. "
+                "Install with: pip install sionna"
+            )
+        if config_path is None:
+            config_path = 'config/sionna_parameters.yaml'
+        model = SionnaModel(config_path)
+        return model.compute_propagation_matrix(sensor_locations, map_shape, scale=scale, n_jobs=n_jobs, verbose=verbose)
     else:
-        raise ValueError(f"Unknown model type: {model_type}")
+        raise ValueError(f"Unknown model type: {model_type}. Choose 'log_distance', 'tirem', or 'raytracing'.")
 
 
 def propagation_matrix_to_map(A_model, map_shape):
