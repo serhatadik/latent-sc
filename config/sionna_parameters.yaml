@@ -1,0 +1,31 @@
+# Sionna RT Propagation Model Parameters
+
+# Frequency in Hz (3534 MHz = 3.534 GHz)
+frequency_hz: 3.534e9
+
+# Transmitter height in meters (for grid points)
+transmitter_height_m: 8.8
+
+# Receiver height in meters (for sensors)
+receiver_height_m: 2.0
+
+# Map file path (relative to project root or absolute)
+map_file: "SLCmap_5May2022.mat"
+
+# Scene cache directory (generated scenes stored here)
+scene_cache_dir: "./data/sionna_scenes"
+
+# Generated scene XML filename
+scene_xml: "slc_scene.xml"
+
+# Grid downsampling factor (1 = full resolution, 10 = 10x downsampled)
+# Higher values = faster scene generation but coarser geometry
+downsample_factor: 1
+
+# Ray-tracing parameters
+max_depth: 5              # Maximum number of reflections/diffractions
+diffraction: true         # Enable diffraction
+num_samples: 1000000      # Number of rays per computation
+
+# Computation batch size (number of TX positions per batch)
+batch_size: 50
