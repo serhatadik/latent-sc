@@ -16,11 +16,11 @@ map_file: "SLCmap_5May2022.mat"
 scene_cache_dir: "./data/sionna_scenes"
 
 # Generated scene XML filename
-scene_xml: "slc_scene.xml"
+scene_xml: "scene.xml"
 
 # Grid downsampling factor (1 = full resolution, 10 = 10x downsampled)
 # Higher values = faster scene generation but coarser geometry
-downsample_factor: 1
+downsample_factor: 10
 
 # Ray-tracing parameters
 max_depth: 5              # Maximum number of reflections/diffractions
