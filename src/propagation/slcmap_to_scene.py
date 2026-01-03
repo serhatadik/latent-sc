@@ -136,6 +136,33 @@ class SLCMapToScene:
             self.buildings = self.buildings[::self.downsample_factor, ::self.downsample_factor]
             self.cellsize *= self.downsample_factor
             
+        # FIX: Handle NoData values (0.0 elevation) robustly
+        # Use Nearest Neighbor inpainting to fill holes smoothly
+        invalid_mask = self.dem <= 1.0 # Assuming site > 1m
+        num_invalid = np.sum(invalid_mask)
+        
+        if num_invalid > 0:
+            print(f"[WARNING] Found {num_invalid} pixels with invalid elevation (<=1m). Inpainting with Nearest Neighbors...")
+            try:
+                from scipy.ndimage import distance_transform_edt
+                # Compute indices of nearest valid pixel (value 0 in mask)
+                # invalid_mask is 1 where we want to fill, 0 where data is valid.
+                # distance_transform_edt finds nearest background (0) pixel.
+                indices = distance_transform_edt(invalid_mask, return_distances=False, return_indices=True)
+                
+                # Use the indices to fetch values from self.dem
+                # This effectively replaces every pixel with its nearest valid neighbor 
+                # (Valid pixels replace themselves as they are their own nearest neighbor)
+                self.dem = self.dem[tuple(indices)]
+                print("[INFO] Inpainting complete.")
+                
+            except ImportError:
+                print("[ERROR] scipy.ndimage required for inpainting. Falling back to global min fill.")
+                valid_mask = ~invalid_mask
+                if np.any(valid_mask):
+                    min_valid = np.min(self.dem[valid_mask])
+                    self.dem[invalid_mask] = min_valid
+        
         # Compute center for scene origin
         self.center_x = (self.axis[0] + self.axis[1]) / 2
         self.center_y = (self.axis[2] + self.axis[3]) / 2
@@ -445,16 +472,25 @@ class SLCMapToScene:
         terrain_filename = Path(terrain_path).name
         
         # Build XML content
+        # Define materials globally at the top
         xml_lines = [
             '<?xml version="1.0" encoding="utf-8"?>',
             '<scene version="2.1.0">',
             '',
-            '  <!-- Combined Elevation Surface (DEM + Buildings) -->',
-            f'  <shape type="ply" id="terrain-{self.terrain_material}">',
+            '  <!-- Material Definitions -->',
+            f'  <bsdf type="diffuse" id="{self.terrain_material}">',
+            '    <rgb name="reflectance" value="0.5, 0.5, 0.5"/>',
+            '  </bsdf>',
+            '',
+            f'  <bsdf type="diffuse" id="{self.building_wall_material}">',
+            '    <rgb name="reflectance" value="0.4, 0.4, 0.4"/>',
+            '  </bsdf>',
+            '',
+            '  <!-- Components -->',
+            '  <!-- Terrain -->',
+            f'  <shape type="ply" id="terrain">',
             f'    <string name="filename" value="meshes/{terrain_filename}"/>',
-            f'    <bsdf type="diffuse" id="{self.terrain_material}">',
-            '      <rgb name="reflectance" value="0.5, 0.5, 0.5"/>',
-            '    </bsdf>',
+            f'    <ref id="{self.terrain_material}"/>',
             '  </shape>',
             '',
         ]
@@ -464,13 +500,15 @@ class SLCMapToScene:
             for building_name, ply_path in building_paths.items():
                 ply_filename = Path(ply_path).name
                 material = self.building_wall_material
+                
+                # Combine building name with material for unique shape ID (optional, but good practice)
+                shape_id = f"{building_name}"
+                
                 xml_lines.extend([
                     f'  <!-- {building_name} -->',
-                    f'  <shape type="ply" id="{building_name}-{material}">',
+                    f'  <shape type="ply" id="{shape_id}">',
                     f'    <string name="filename" value="meshes/{ply_filename}"/>',
-                    f'    <bsdf type="diffuse" id="{material}">',
-                    '      <rgb name="reflectance" value="0.4, 0.4, 0.4"/>',
-                    '    </bsdf>',
+                    f'    <ref id="{material}"/>',
                     '  </shape>',
                     '',
                 ])
