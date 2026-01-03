@@ -34,7 +34,9 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
                                  selection_method='max', cluster_distance_m=100.0, cluster_threshold_fraction=0.1,
                                  cluster_max_candidates=100,
                                  dedupe_distance_m=25.0,
-                                 verbose=True, input_is_linear=False, solve_in_linear_domain=None, **solver_kwargs):
+                                 verbose=True, input_is_linear=False, solve_in_linear_domain=None, 
+                                 path_gain_method='coverage_map',
+                                 **solver_kwargs):
     """
     Perform joint sparse reconstruction to estimate transmit power field.
 
@@ -134,6 +136,8 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
         If True, solve the optimization problem in linear domain: min ||W(At - p)||^2.
         If False, solve in log domain: min ||W(log(At) - log(p))||^2.
         If None (default), infers from input_is_linear (True if input_is_linear else False).
+    path_gain_method : str, optional
+        Method for path gain computation (raytracing only): 'coverage_map' (default) or 'raytracing'.
     **solver_kwargs : dict
         Additional arguments passed to solver
 
@@ -270,7 +274,8 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
     A_model = compute_propagation_matrix(
         sensor_locations, map_shape, scale=scale,
         model_type=model_type, config_path=tirem_config_path,
-        np_exponent=np_exponent, vectorized=True, n_jobs=n_jobs, verbose=verbose
+        np_exponent=np_exponent, vectorized=True, n_jobs=n_jobs, verbose=verbose,
+        path_gain_method=path_gain_method
     )
 
 

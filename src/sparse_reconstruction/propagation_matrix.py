@@ -19,7 +19,8 @@ from src.propagation.log_distance import compute_linear_path_gain
 def compute_propagation_matrix(sensor_locations, map_shape, scale=1.0,
                                 model_type='log_distance', config_path=None,
                                 np_exponent=2, pi0=0, di0=1,
-                                vectorized=True, n_jobs=-1, verbose=True):
+                                vectorized=True, n_jobs=-1, verbose=True,
+                                path_gain_method='coverage_map'):
     """
     Build propagation matrix A_model ∈ ℝ^(M×N) using the selected propagation model.
 
@@ -47,6 +48,8 @@ def compute_propagation_matrix(sensor_locations, map_shape, scale=1.0,
         Number of parallel jobs for TIREM computation, default: -1 (all CPUs)
     verbose : bool, optional
         Print progress information, default: True
+    path_gain_method : str, optional
+        Method for path gain computation (raytracing only): 'coverage_map' (default) or 'raytracing'.
 
     Returns
     -------
@@ -73,7 +76,8 @@ def compute_propagation_matrix(sensor_locations, map_shape, scale=1.0,
         if config_path is None:
             config_path = 'config/sionna_parameters.yaml'
         model = SionnaModel(config_path)
-        return model.compute_propagation_matrix(sensor_locations, map_shape, scale=scale, n_jobs=n_jobs, verbose=verbose)
+        return model.compute_propagation_matrix(sensor_locations, map_shape, scale=scale, n_jobs=n_jobs,
+                                                verbose=verbose, method=path_gain_method)
     else:
         raise ValueError(f"Unknown model type: {model_type}. Choose 'log_distance', 'tirem', or 'raytracing'.")
 
