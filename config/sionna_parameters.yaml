@@ -25,7 +25,7 @@ downsample_factor: 10
 # Ray-tracing parameters
 max_depth: 5              # Maximum number of reflections/diffractions
 diffraction: true         # Enable diffraction
-num_samples: 1000000      # Number of rays per computation
+num_samples: 10000000      # Number of rays per computation
 
 # Computation batch size (number of TX positions per batch)
 batch_size: 50

@@ -216,33 +216,57 @@ class SionnaModel(PropagationModel):
         meta_path = self.scene_cache_dir / "scene_meta.yaml"
         
         # Check if scene and metadata already exist
-        if scene_path.exists() and meta_path.exists():
-            if verbose:
-                print(f"[INFO] Loading cached scene from: {scene_path}")
-            self.scene = self._load_scene(str(scene_path))
-            
-            # Load center coordinates from scene metadata
-            with open(meta_path, 'r') as f:
-                meta = yaml.safe_load(f)
-                self.center_x = meta.get('center_x', 0.0)
-                self.center_y = meta.get('center_y', 0.0)
-        else:
+        should_generate = True # FORCE REGENERATION for debug
+        # if scene_path.exists() and meta_path.exists():
+        if False: # Disabled cache check
+
+            try:
+                with open(meta_path, 'r') as f:
+                    meta = yaml.safe_load(f)
+                    self.center_x = meta.get('center_x', 0.0)
+                    self.center_y = meta.get('center_y', 0.0)
+                    self.scene_rows = meta.get('rows')
+                    self.scene_cols = meta.get('cols')
+                    
+                # If rows/cols missing (old meta), force regeneration
+                if self.scene_rows is not None and self.scene_cols is not None:
+                    if verbose:
+                        print(f"[INFO] Loading cached scene from: {scene_path}")
+                    self.scene = self._load_scene(str(scene_path))
+                    should_generate = False
+                else:
+                    if verbose:
+                        print(f"[INFO] Cached scene metadata incomplete. Regenerating...")
+            except Exception as e:
+                if verbose:
+                    print(f"[WARNING] Failed to load scene metadata: {e}. Regenerating...")
+        
+        if should_generate:
             # Generate scene from SLCMap
             if verbose:
                 print(f"[INFO] Generating scene from SLCMap: {self.map_path}")
                 
             from .slcmap_to_scene import SLCMapToScene
             
+            # Ensure using combined mesh for RadioMapSolver compatibility
+            # We need one "terrain" object that includes everything
+            
             converter = SLCMapToScene(
                 self.map_path,
                 output_dir=str(self.scene_cache_dir),
                 downsample_factor=self.config.get('downsample_factor', 1)
             )
-            scene_path = converter.export_to_mitsuba_xml(self.scene_xml)
             
-            # Save center coordinates
+            # Export with separate_buildings=False to create one combined "terrain" mesh
+            scene_path = converter.export_to_mitsuba_xml(self.scene_xml, separate_buildings=False)
+            
+            # Save center coordinates and dimensions
             self.center_x = converter.center_x
             self.center_y = converter.center_y
+            self.scene_rows = converter.dem.shape[0]
+            self.scene_cols = converter.dem.shape[1]
+            if verbose:
+                print(f"[DEBUG] Generated scene rows/cols from dem: {self.scene_rows}x{self.scene_cols}")
             
             meta_path = self.scene_cache_dir / "scene_meta.yaml"
             with open(meta_path, 'w') as f:
@@ -250,7 +274,9 @@ class SionnaModel(PropagationModel):
                     'center_x': float(self.center_x),
                     'center_y': float(self.center_y),
                     'cellsize': float(converter.cellsize),
-                    'map_file': str(self.map_file)
+                    'map_file': str(self.map_file),
+                    'rows': int(self.scene_rows),
+                    'cols': int(self.scene_cols)
                 }, f)
                 
             # Load the generated scene
@@ -280,6 +306,63 @@ class SionnaModel(PropagationModel):
     def _local_to_utm(self, x: np.ndarray, y: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """Convert local scene coordinates to UTM."""
         return x + self.center_x, y + self.center_y
+
+    def _get_vertex_mapping_data(self):
+        """
+        Pre-compute face-to-vertex indices for the regular grid mesh.
+        Matches logic in SLCMapToScene.generate_terrain_mesh.
+        """
+        rows = self.scene_rows
+        cols = self.scene_cols
+        
+        # Number of quads
+        h_quads = rows - 1
+        w_quads = cols - 1
+        n_faces = h_quads * w_quads * 2
+        
+        # Generate faces array (matches slcmap_to_scene)
+        # Quad indices
+        r_idx = np.arange(h_quads)
+        c_idx = np.arange(w_quads)
+        R, C = np.meshgrid(r_idx, c_idx, indexing='ij')
+        
+        idx00 = R * cols + C
+        idx01 = R * cols + (C + 1)
+        idx10 = (R + 1) * cols + C
+        idx11 = (R + 1) * cols + (C + 1)
+        
+        # Flatten (assuming row-major flattening matches meshgrid indexing='ij')
+        # meshgrid(ij) -> R varies slowly (rows), C varies quickly (cols).
+        # This is strictly consistent with nested loops: for r: for c:
+        
+        idx00 = idx00.ravel()
+        idx01 = idx01.ravel()
+        idx10 = idx10.ravel()
+        idx11 = idx11.ravel()
+        
+        # Triangle 1: 00, 10, 01
+        t1 = np.column_stack([idx00, idx10, idx01])
+        # Triangle 2: 10, 11, 01
+        t2 = np.column_stack([idx10, idx11, idx01])
+        
+        # Interleave to match likely generation order: for i, for j: append T1, append T2.
+        # This implies: Face 0, Face 1, Face 2, Face 3...
+        # So we construct faces array of shape (N, 3)
+        # 0::2 is T1, 1::2 is T2
+        
+        faces = np.empty((n_faces, 3), dtype=np.int32)
+        faces[0::2] = t1
+        faces[1::2] = t2
+        
+        # Vertex counts for averaging
+        vertex_counts = np.zeros(rows * cols, dtype=np.float32)
+        
+        # We need counts of how many faces touch each vertex
+        # Just compute it once
+        # faces.ravel() contains all vertex indices used in all faces
+        np.add.at(vertex_counts, faces.ravel(), 1)
+        
+        return faces, vertex_counts
         
     def compute_propagation_matrix(
         self,
@@ -290,13 +373,13 @@ class SionnaModel(PropagationModel):
         verbose: bool = True
     ) -> np.ndarray:
         """
-        Compute propagation matrix (path gains) using Sionna ray-tracing.
+        Compute propagation matrix (path gains) using Sionna RadioMapSolver.
         
-        Uses Terrain-Aware Vectorized Reciprocity:
+        Uses Terrain-Aware Vectorized Reciprocity via RadioMapSolver:
         1. Place a Transmitter at the Sensor location (Reciprocity).
-        2. Place a single Receiver object with multiple positions corresponding to the grid points
-           adjusted for correct terrain height.
-        3. Compute paths in one vectorized batch.
+        2. Compute coverage on the entire terrain mesh.
+        3. Map mesh face values to grid vertices.
+        4. Interpolate to requested map geometry.
         
         Parameters
         ----------
@@ -315,10 +398,10 @@ class SionnaModel(PropagationModel):
         -------
         A : ndarray of shape (M, N)
             Path gain matrix (linear power ratio)
-            A[m, n] = path gain from grid point n to sensor m
         """
         import hashlib
         import json
+        from scipy import ndimage
         
         # Define cache directory - use absolute path based on this file's location
         _THIS_DIR = Path(__file__).parent.resolve()
@@ -335,10 +418,8 @@ class SionnaModel(PropagationModel):
             'map_path': str(self.map_path)
         }
         
-        # Create a stable string representation for hashing
         cache_string = json.dumps(cache_params, sort_keys=True)
         cache_hash = hashlib.md5(cache_string.encode('utf-8')).hexdigest()
-        
         cache_file = CACHE_DIR / f"sionna_prop_matrix_{cache_hash}.npy"
         
         if cache_file.exists():
@@ -351,161 +432,230 @@ class SionnaModel(PropagationModel):
 
         self._ensure_scene(verbose=verbose)
         
-        import tensorflow as tf
+        # Import RadioMapSolver here
+        from sionna.rt import RadioMapSolver
         
         M = len(sensor_locations)
-        height, width = map_shape
-        N = height * width
+        height_query, width_query = map_shape
+        N_query = height_query * width_query
         
         if verbose:
-            print(f"[INFO] Computing propagation matrix via Vectorized Reciprocity: {M} sensors × {N} grid points")
+            print(f"[INFO] Computing propagation matrix via RadioMapSolver")
+            print(f"  Sensors: {M}")
+            print(f"  Scene Grid: {self.scene_rows}x{self.scene_cols}")
+            print(f"  Target Grid: {height_query}x{width_query}")
             
-        # Initialize output matrix
-        A = np.zeros((M, N), dtype=np.float64)
+        # 1. Initialize Solver
+        solver = RadioMapSolver()
         
-        # Convert sensor locations to local coordinates
-        width_m = width * scale
-        height_m = height * scale
+        # Get the terrain mesh object
+        # Sionna may rename objects - check multiple possible keys
+        terrain_obj = None
+        possible_keys = ['terrain', 'merged-shapes']  # Sionna often uses 'merged-shapes'
         
-        sensor_x_local = (sensor_locations[:, 0] * scale) - (width_m / 2.0)
-        sensor_y_local = (sensor_locations[:, 1] * scale) - (height_m / 2.0)
+        for key in possible_keys:
+            if key in self.scene.objects:
+                terrain_obj = self.scene.objects[key]
+                if verbose:
+                    print(f"[DEBUG] Found terrain as '{key}'")
+                break
         
-        # Grid coordinates
-        grid_rows = np.arange(height)
-        grid_cols = np.arange(width)
-        grid_x_local = (grid_cols * scale) - (width_m / 2.0) # 1D
-        grid_y_local = (grid_rows * scale) - (height_m / 2.0) # 1D
+        if terrain_obj is None:
+            # Fallback: use first object in scene
+            if len(self.scene.objects) > 0:
+                key = list(self.scene.objects.keys())[0]
+                terrain_obj = self.scene.objects[key]
+                if verbose:
+                    print(f"[DEBUG] Using first object as terrain: '{key}'")
+            else:
+                raise ValueError(f"No objects found in scene. Keys: {list(self.scene.objects.keys())}")
         
-        # Meshgrid (flattened)
-        grid_X_local, grid_Y_local = np.meshgrid(grid_x_local, grid_y_local)
-        grid_pts_x = grid_X_local.ravel()
-        grid_pts_y = grid_Y_local.ravel()
+        # Clone as mesh for proper RadioMapSolver usage
+        # This is the official Sionna approach per their tutorials
+        terrain_mesh = terrain_obj.clone(as_mesh=True)
         
-        # Determine terrain height for all grid points
+        # CRITICAL: Elevate the measurement surface above the terrain!
+        # If measurement surface is at same position as terrain, rays hit terrain
+        # but never "hit" the measurement surface. 
+        # Elevate by receiver height to measure signal at receiver level.
+        from sionna.rt import transform_mesh
+        transform_mesh(terrain_mesh, translation=[0, 0, self.rx_height])
+        
         if verbose:
-            print("[INFO] querying terrain elevation for grid points...")
+            if hasattr(terrain_mesh, 'face_count'):
+                print(f"[DEBUG] Terrain mesh face count: {terrain_mesh.face_count()}")
+            print(f"[DEBUG] Measurement surface elevated by {self.rx_height}m")
+
+
+
+        # 2. Pre-compute face mapping
+        if verbose:
+            print("[INFO] Pre-computing mesh face-to-vertex mapping...")
+        faces, vertex_counts = self._get_vertex_mapping_data()
+        
+        # 3. Setup Coordinate Mapping for Interpolation
+        # We need to map query pixels (map_shape) to scene pixels (scene_rows, scene_cols)
+        
+        width_m = width_query * scale
+        height_m = height_query * scale
+        
+        # Query coords in local meters (assuming centered)
+        q_cols = np.arange(width_query)
+        q_rows = np.arange(height_query)
+        q_x_local = (q_cols * scale) - (width_m / 2.0)
+        q_y_local = (q_rows * scale) - (height_m / 2.0)
+        
+        if not hasattr(self, 'map_axis'):
+             self._load_elevation_map()
+             
+        meta_path = self.scene_cache_dir / "scene_meta.yaml"
+        with open(meta_path, 'r') as f:
+             meta = yaml.safe_load(f)
+             scene_cellsize = meta.get('cellsize')
+             
+        # Coordinate transform function for interpolation
+        # map_coordinates expects indices in [0, H-1], [0, W-1]
+        
+        def coords_to_scene_indices(x_local, y_local):
+            x_utm = x_local + self.center_x
+            y_utm = y_local + self.center_y
+            # Matches generate_terrain_mesh logic:
+            # x = axis[0] + col * cellsize - center_x -> col = (x + center_x - axis[0]) / cellsize
+            # y = axis[2] + row * cellsize - center_y -> row = (y + center_x - axis[2]) / cellsize
+            col = (x_utm - self.map_axis[0]) / scene_cellsize
+            row = (y_utm - self.map_axis[2]) / scene_cellsize
+            return row, col
             
-        # Batch terrain query to avoid memory issues if N is large?
-        # 12k points is small. 1M points is large.
-        # _get_terrain_elevation is efficient (numpy indexing).
-        grid_pts_z_ground = self._get_terrain_elevation(grid_pts_x, grid_pts_y)
+        # Grid mesh for interpolation
+        QX, QY = np.meshgrid(q_x_local, q_y_local) # QX is (H, W) array of x coords
+        Q_rows, Q_cols = coords_to_scene_indices(QX, QY)
         
-        # Grid points act as Transmitters in reality, so use tx_height (AGL)
-        grid_pts_z = grid_pts_z_ground + self.tx_height
+        # Stack for map_coordinates: (2, N_query) -> row_coords, col_coords
+        interpolation_coords = np.stack([Q_rows.ravel(), Q_cols.ravel()])
         
-        # Combine into (N, 3) positions
-        grid_positions = np.column_stack((grid_pts_x, grid_pts_y, grid_pts_z))
+        # 4. Compute
+        A = np.zeros((M, N_query), dtype=np.float64)
         
-        # Determine sensor heights
-        sensor_z_ground = self._get_terrain_elevation(sensor_x_local, sensor_y_local)
-        # Sensors are Receivers in reality, so use rx_height. In Reciprocity, they are Tx.
-        # But we must preserve their physical 3D location.
-        sensor_z = sensor_z_ground + self.rx_height 
-        
-        # Add ONE Transmitter (Reciprocity: Sensor acts as Tx)
+        # Add temporary Transmitter
         try:
              self.scene.remove("tx_temp")
         except:
              pass
-             
-        tx = self._Transmitter(
-            name="tx_temp",
-            position=[0, 0, 0], 
-            orientation=[0, 0, 0]
-        )
+        tx = self._Transmitter(name="tx_temp", position=[0,0,0])
         self.scene.add(tx)
-        
-        # Sionna cannot handle unlimited number of paths/receivers in one go safely on small GPUs.
-        # We should batch strict limit. E.g. 500 grid points.
-        GRID_BATCH_SIZE = self.config.get('grid_batch_size', 500)
         
         try:
             for i in range(M):
                 if verbose:
-                    print(f"  Processing sensor {i+1}/{M} (Reciprocity)")
+                    print(f"  Processing sensor {i+1}/{M}")
+                    
+                # Setup Transmitter at Sensor Location (Reciprocity)
+                sx_pix, sy_pix = sensor_locations[i]
+                sx_local = sx_pix * scale - width_m / 2.0
+                sy_local = sy_pix * scale - height_m / 2.0
                 
-                # Move transmitter to sensor location
-                tx.position = [sensor_x_local[i], sensor_y_local[i], sensor_z[i]]
+                # Use terrain height from our pre-loaded map? Or from scene?
+                # Using _get_terrain_elevation (scalar) is consistent.
+                sz_ground_arr = self._get_terrain_elevation(np.array([sx_local]), np.array([sy_local]))
+                sz_ground = sz_ground_arr[0]
+                sz = sz_ground + self.rx_height # Sensor height AGL
                 
-                # Create Receiver Object Pool
-                # We reuse these objects to avoid scene.add/remove overhead and TF retracing
-                rx_pool_names = []
+                tx.position = [float(sx_local), float(sy_local), float(sz)]
+                
+                # Compute coverage
+                count_samples = self.config.get('num_samples', 10_000_000)
+                
+                # Use unified __call__ API with mesh argument
+                # Note: confirmed RadioMapSolver defaults to 1m resolution if cell_size not passed.
+                # Reverting to default (no cell_size).
+                radio_map = solver(
+                    self.scene, 
+                    measurement_surface=terrain_mesh, 
+                    samples_per_tx=count_samples,
+                    diffraction=True, # Enable diffraction for terrain shadowing
+                    max_depth=5 # Ensure sufficient bounces/diffraction
+                )
+                
+                # radio_map.path_gain is [num_tx, num_cells].
+                path_gain = radio_map.path_gain.numpy().flatten()
+                
                 if verbose:
-                    print(f"[INFO] initializing receiver pool of size {GRID_BATCH_SIZE}...")
+                    print(f"[DEBUG] path_gain size: {path_gain.size}")
+                    print(f"[DEBUG] path_gain range: [{path_gain.min():.2e}, {path_gain.max():.2e}]")
+                    print(f"[DEBUG] path_gain non-zero: {np.sum(path_gain > 0)}")
+                    print(f"[DEBUG] path_gain mean (where >0): {np.mean(path_gain[path_gain > 0]):.2e}" if np.any(path_gain > 0) else "[DEBUG] No non-zero path gains!")
                 
-                try:
-                    for idx in range(GRID_BATCH_SIZE):
-                        rx_name = f"rx_pool_{idx}"
-                        rx_pool_names.append(rx_name)
-                        try:
-                            self.scene.remove(rx_name)
-                        except:
-                            pass
-                        # Initial dummy position
-                        rx = self._Receiver(
-                            name=rx_name,
-                            position=[0,0,-1000],
-                            orientation=[0,0,0]
-                        )
-                        self.scene.add(rx)
+                # Check for grid structure
+                
+                r = self.scene_rows
+                c = self.scene_cols
+                
+                if path_gain.size == r * c:
+                     # Match Vertices
+                     if verbose:
+                         print(f"[DEBUG] Matched vertex grid: {r}x{c}")
+                     scene_grid = path_gain.reshape(r, c)
+                     coord_offset = 0.0
+                     
+                elif path_gain.size == (r-1) * (c-1):
+                     if verbose: 
+                         print(f"[DEBUG] Detected Cell-based grid ({r-1}x{c-1}).")
+                     # Try Row-Major (Height, Width) assuming standard Numpy order matches Sionna
+                     scene_grid = path_gain.reshape(r-1, c-1)
+                     coord_offset = -0.5
+                     
+                # Scenario 2: Half resolution grid (H/2 * W/2) - Common with some mesh settings
+                # This check might need adjustment if it's (r-1)//2 ? 
+                # Let's check exact match first.
+                elif path_gain.size == (r // 2) * (c // 2):
+                    if verbose:
+                        print(f"[DEBUG] Detected half-resolution output ({r // 2}x{c // 2}). Upsampling.")
+                        
+                    # Revert flipud
+                    low_res_grid = path_gain.reshape(r // 2, c // 2)
+                    
+                    # Upsample to full resolution
+                    scene_grid = ndimage.zoom(low_res_grid, 2.0, order=1)
+                    coord_offset = 0.0 # Approximation
 
-                    # Loop over grid batches
-                    for batch_start in range(0, N, GRID_BATCH_SIZE):
-                        batch_end = min(batch_start + GRID_BATCH_SIZE, N)
-                        curr_batch_size = batch_end - batch_start
-                        
-                        # Update positions for current batch
-                        for idx in range(curr_batch_size):
-                            # Map to corresponding receiver in pool
-                            rx_name = rx_pool_names[idx]
-                            # Update position directly
-                            # Accessing object from scene is safer?
-                            # self.scene.get(rx_name).position = ...
-                            # Or just keep reference? 
-                            # self.scene.get(rx_name) returns the object.
-                            obj = self.scene.get(rx_name)
-                            obj.position = grid_positions[batch_start + idx]
-                            
-                        # Move unused receivers in pool out of the way (if last batch is small)
-                        if curr_batch_size < GRID_BATCH_SIZE:
-                            for idx in range(curr_batch_size, GRID_BATCH_SIZE):
-                                obj = self.scene.get(rx_pool_names[idx])
-                                obj.position = [0,0,-1000]
+                # Scenario 3: Face-based mapping (original plan)
+                # Check if it matches face count
+                elif path_gain.size == faces.shape[0]:
+                     if verbose:
+                         print(f"[DEBUG] Using face-based mapping: {path_gain.size} faces -> {r}x{c} vertices")
+                     # Map to Vertices
+                     vertex_gains = np.zeros(self.scene_rows * self.scene_cols, dtype=np.float64)
+                     vals_expanded = np.repeat(path_gain, 3) 
+                     indices_expanded = faces.ravel()
+                     np.add.at(vertex_gains, indices_expanded, vals_expanded)
+                     mask = vertex_counts > 0
+                     vertex_gains[mask] /= vertex_counts[mask]
+                     scene_grid = vertex_gains.reshape(self.scene_rows, self.scene_cols)
+                     coord_offset = 0.0
+                     
+                     if verbose:
+                         print(f"[DEBUG] scene_grid range after mapping: [{scene_grid.min():.2e}, {scene_grid.max():.2e}]")
+                     
+                else:
+                    msg = f"Shape mismatch! path_gain: {path_gain.shape}, Expected Vertices: {r*c}, Cells: {(r-1)*(c-1)}, Half-Cells: {(r//2)*(c//2)}, Faces: {faces.shape[0]}"
+                    raise RuntimeError(msg)
 
-                        # Compute paths
-                        paths = self.scene.compute_paths(
-                            max_depth=self.max_depth,
-                            diffraction=self.diffraction,
-                            num_samples=self.num_samples
-                        )
-                        
-                        # Compute power
-                        a, tau = paths.cir()
-                        # Reduce
-                        path_power = tf.reduce_sum(tf.abs(a)**2, axis=(-1, -2)) # Sum time, paths
-                        path_power = tf.reduce_sum(path_power, axis=(-1, -2))   # Sum ant
-                        path_power = path_power.numpy().flatten()
-                        
-                        # Store valid part
-                        # path_power corresponds to ALL receivers in scene?
-                        # No, path_power shape depends on scene receivers.
-                        # We have 1 Tx and GRID_BATCH_SIZE Rx.
-                        # So path_power should have GRID_BATCH_SIZE elements.
-                        
-                        if len(path_power) >= curr_batch_size:
-                            A[i, batch_start:batch_end] = path_power[:curr_batch_size]
-                        else:
-                            if verbose:
-                                print(f"[WARNING] Batch output mismatch: {len(path_power)} vs {curr_batch_size}")
+                # Interpolate to Query Grid
+                # interpolation_coords are in Vertex Indices. 
+                # If we have a Cell Grid, we shift coordinates by offset.
+                
+                interp_coords_shifted = interpolation_coords + coord_offset
+                
+                query_gains = ndimage.map_coordinates(
+                    scene_grid, 
+                    interp_coords_shifted, 
+                    order=1, 
+                    mode='nearest' # Extrapolate edges
+                )
+                
+                A[i, :] = query_gains
+                
 
-                finally:
-                    # Clean up pool
-                    for rx_name in rx_pool_names:
-                        try:
-                            self.scene.remove(rx_name)
-                        except:
-                            pass
-                        
         finally:
             try:
                 self.scene.remove("tx_temp")
