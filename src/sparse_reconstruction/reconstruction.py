@@ -34,6 +34,8 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
                                  selection_method='max', cluster_distance_m=100.0, cluster_threshold_fraction=0.1,
                                  cluster_max_candidates=100,
                                  dedupe_distance_m=25.0,
+                                 verbose=True,
+                                 input_is_linear=False, solve_in_linear_domain=None,
                                  **solver_kwargs):
     """
     Perform joint sparse reconstruction to estimate transmit power field.
@@ -243,7 +245,12 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
         # Compute geometric features
         if feature_config_path is None:
              # Default fallback ensures we share cache across different model selections
-             feature_config_path = 'config/tirem_parameters.yaml'
+             # Try ../config/ first (notebooks), then config/ (script root)
+             import os
+             if os.path.exists('../config/tirem_parameters.yaml'):
+                 feature_config_path = '../config/tirem_parameters.yaml'
+             else:
+                 feature_config_path = 'config/tirem_parameters.yaml'
 
         if verbose:
             print(f"  Computing geometric features using TIREM (config: {feature_config_path})...")
