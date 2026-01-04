@@ -28,11 +28,13 @@ wheels/
 data/raw/
 data/processed/
 data/results/
+data/cache/
 *.mat
 *.csv
 *.csv.gz
 *.npy
 *.npz
+*.png
 
 config/monitoring_locations*
 results/

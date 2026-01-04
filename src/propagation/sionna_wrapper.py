@@ -317,6 +317,38 @@ class SionnaModel(PropagationModel):
             Path gain matrix (linear power ratio)
             A[m, n] = path gain from grid point n to sensor m
         """
+        import hashlib
+        import json
+        
+        # Define cache directory - use absolute path based on this file's location
+        _THIS_DIR = Path(__file__).parent.resolve()
+        _PROJECT_ROOT = _THIS_DIR.parent.parent
+        CACHE_DIR = _PROJECT_ROOT / "data" / "cache" / "sionna"
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        
+        # Create a unique cache key based on all parameters that affect the result
+        cache_params = {
+            'sensor_locations': sensor_locations.tolist() if isinstance(sensor_locations, np.ndarray) else sensor_locations,
+            'map_shape': list(map_shape),
+            'scale': float(scale),
+            'sionna_config': self.config,
+            'map_path': str(self.map_path)
+        }
+        
+        # Create a stable string representation for hashing
+        cache_string = json.dumps(cache_params, sort_keys=True)
+        cache_hash = hashlib.md5(cache_string.encode('utf-8')).hexdigest()
+        
+        cache_file = CACHE_DIR / f"sionna_prop_matrix_{cache_hash}.npy"
+        
+        if cache_file.exists():
+            if verbose:
+                print(f"[INFO] Loading cached propagation matrix from: {cache_file}")
+            try:
+                return np.load(cache_file)
+            except Exception as e:
+                print(f"[WARNING] Failed to load cache: {e}. Recomputing...")
+
         self._ensure_scene(verbose=verbose)
         
         import tensorflow as tf
@@ -483,5 +515,13 @@ class SionnaModel(PropagationModel):
         if verbose:
             print(f"[INFO] Propagation matrix computation complete")
             print(f"  Mean path gain: {np.mean(A[A > 1e-20]):.2e}")
+            
+        # Save to cache
+        if verbose:
+            print(f"[INFO] Saving propagation matrix to cache: {cache_file}")
+        try:
+            np.save(cache_file, A)
+        except Exception as e:
+            print(f"[WARNING] Failed to save cache: {e}")
             
         return A
