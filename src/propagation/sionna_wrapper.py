@@ -10,7 +10,6 @@ import numpy as np
 import yaml
 from pathlib import Path
 from typing import Optional, Tuple
-from scipy.interpolate import RegularGridInterpolator
 from .base import PropagationModel
 
 # Delay Sionna imports to allow the module to be loaded even without Sionna
@@ -288,11 +287,16 @@ class SionnaModel(PropagationModel):
         map_shape: Tuple[int, int],
         scale: float = 1.0,
         n_jobs: int = -1,
-        verbose: bool = True,
-        method: str = 'coverage_map'
+        verbose: bool = True
     ) -> np.ndarray:
         """
         Compute propagation matrix (path gains) using Sionna ray-tracing.
+        
+        Uses Terrain-Aware Vectorized Reciprocity:
+        1. Place a Transmitter at the Sensor location (Reciprocity).
+        2. Place a single Receiver object with multiple positions corresponding to the grid points
+           adjusted for correct terrain height.
+        3. Compute paths in one vectorized batch.
         
         Parameters
         ----------
@@ -306,8 +310,6 @@ class SionnaModel(PropagationModel):
             Number of parallel jobs (currently not used - Sionna uses GPU)
         verbose : bool
             Print progress information
-        method : str, optional
-            Computation method: 'coverage_map' (default, fast) or 'raytracing' (slow, point-to-point)
             
         Returns
         -------
@@ -316,138 +318,7 @@ class SionnaModel(PropagationModel):
             A[m, n] = path gain from grid point n to sensor m
         """
         self._ensure_scene(verbose=verbose)
-
-        if method == 'coverage_map':
-            return self._compute_via_coverage_map(sensor_locations, map_shape, scale, verbose)
         
-        import tensorflow as tf
-        
-        M = len(sensor_locations)
-        height, width = map_shape
-        N = height * width
-        
-        if verbose:
-            print(f"[INFO] Computing propagation matrix: {M} sensors × {N} grid points")
-            
-        # Initialize output matrix
-        A = np.zeros((M, N), dtype=np.float64)  # Initialize with 0 gain
-        
-        # Convert sensor locations to local coordinates
-        # sensor_locations are in pixel space (col, row)
-        # We assume the grid is centered on the scene origin (0,0)
-        # x_local = (col * scale) - (width_m / 2)
-        # y_local = (row * scale) - (height_m / 2)
-        
-        width_m = width * scale
-        height_m = height * scale
-        
-        sensor_x_local = (sensor_locations[:, 0] * scale) - (width_m / 2.0)
-        sensor_y_local = (sensor_locations[:, 1] * scale) - (height_m / 2.0)
-        
-        # For each grid point, compute path gain to all sensors
-        # This is computationally intensive - we'll batch by grid points
-        batch_size = self.config.get('batch_size', 100)
-        
-        for grid_idx in range(0, N, batch_size):
-            end_idx = min(grid_idx + batch_size, N)
-            
-            if verbose and grid_idx % (batch_size * 10) == 0:
-                print(f"  Progress: {grid_idx}/{N} grid points ({100*grid_idx/N:.1f}%)")
-                
-            for tx_idx in range(grid_idx, end_idx):
-                # Get grid point coordinates
-                row = tx_idx // width
-                col = tx_idx % width
-                
-                # Local coordinates centered
-                tx_x_local = (col * scale) - (width_m / 2.0)
-                tx_y_local = (row * scale) - (height_m / 2.0)
-                
-                # Find ground height at TX location
-                tx_z_ground = self._get_terrain_elevation(tx_x_local, tx_y_local)
-                tx_z = tx_z_ground + self.tx_height
-                
-                # Add transmitter
-                tx = self._Transmitter(
-                    name="tx_temp",
-                    position=[tx_x_local, tx_y_local, tx_z],
-                    orientation=[0, 0, 0]
-                )
-                self.scene.add(tx)
-                
-                try:
-                    # Add all receivers (Batched)
-                    # We compute RX heights once
-                    rx_z_ground = self._get_terrain_elevation(sensor_x_local, sensor_y_local) # Vectorized
-                    rx_z = rx_z_ground + self.rx_height
-                    
-                    for rx_idx in range(len(sensor_x_local)):
-                        rx = self._Receiver(
-                            name=f"rx_{rx_idx}",
-                            position=[sensor_x_local[rx_idx], sensor_y_local[rx_idx], rx_z[rx_idx]],
-                            orientation=[0, 0, 0]
-                        )
-                        self.scene.add(rx)
-                        
-                    # Compute paths
-                    paths = self.scene.compute_paths(
-                        max_depth=self.max_depth,
-                        diffraction=self.diffraction,
-                        num_samples=self.num_samples
-                    )
-                    
-                    # Get channel impulse response
-                    a, tau = paths.cir()
-                    
-                    # Compute path gain (sum of squared amplitudes)
-                    # a shape: [batch, num_rx, num_rx_ant, num_tx, num_tx_ant, num_paths, num_time]
-                    path_power = tf.reduce_sum(tf.abs(a)**2, axis=(2, 4, 5, 6))  # Sum over antennas, paths, time
-                    path_power = path_power.numpy().squeeze()  # [num_rx]
-                    
-                    # Convert to dB
-                    # path_gain_db = 10 * np.log10(path_power + 1e-30)
-                    
-                    # Store in matrix (Linear)
-                    A[:, tx_idx] = path_power
-                    
-                finally:
-                    # Clean up receivers and transmitter
-                    for rx_idx in range(M):
-                        try:
-                            self.scene.remove(f"rx_{rx_idx}")
-                        except:
-                            pass
-                    try:
-                        self.scene.remove("tx_temp")
-                    except:
-                        pass
-                        
-        if verbose:
-            print(f"[INFO] Propagation matrix computation complete")
-        if verbose:
-            print(f"[INFO] Propagation matrix computation complete")
-            print(f"  Mean path gain: {np.mean(A[A > 1e-20]):.2e}")
-            print(f"  Range: [{np.min(A):.2e}, {np.max(A):.2e}]")
-            
-        return A
-
-    def _compute_via_coverage_map(
-        self,
-        sensor_locations: np.ndarray,
-        map_shape: Tuple[int, int],
-        scale: float,
-        verbose: bool = True
-    ) -> np.ndarray:
-        """
-        Compute propagation matrix using reciprocity and vectorized 'Receiver Cloud'.
-        
-        This replaces the old 'coverage_map' method which assumes a flat plane.
-        Instead, we use reciprocity:
-        1. Place a Transmitter at the Sensor location (Reciprocity).
-        2. Place a single Receiver object with multiple positions corresponding to the grid points
-           adjusted for correct terrain height.
-        3. Compute paths in one vectorized batch.
-        """
         import tensorflow as tf
         
         M = len(sensor_locations)
@@ -603,150 +474,6 @@ class SionnaModel(PropagationModel):
                         except:
                             pass
                         
-        finally:
-            try:
-                self.scene.remove("tx_temp")
-            except:
-                pass
-                
-        if verbose:
-            print(f"[INFO] Propagation matrix computation complete")
-            print(f"  Mean path gain: {np.mean(A[A > 1e-20]):.2e}")
-            
-        return A
-        height, width = map_shape
-        N = height * width
-        
-        if verbose:
-            print(f"[INFO] Computing propagation matrix via Coverage Map: {M} sensors × {N} grid points")
-            
-        # Initialize output matrix
-        A = np.zeros((M, N), dtype=np.float64)
-        
-        # Convert sensor locations to local coordinates
-        width_m = width * scale
-        height_m = height * scale
-        
-        sensor_x_local = (sensor_locations[:, 0] * scale) - (width_m / 2.0)
-        sensor_y_local = (sensor_locations[:, 1] * scale) - (height_m / 2.0)
-        
-        # Grid coordinates for interpolation
-        # The reconstruction grid targets (where we want path gain values):
-        grid_rows = np.arange(height)
-        grid_cols = np.arange(width)
-        
-        # Local coordinates
-        grid_x_local = (grid_cols * scale) - (width_m / 2.0)
-        grid_y_local = (grid_rows * scale) - (height_m / 2.0)
-        
-        # Meshgrid for interpolation query points (flattened)
-        # We need to query at every (col, row) pair
-        # Note: RegularGridInterpolator expects (x, y) coordinates if defined that way
-        
-        # Let's define the target grid points in local coordinates
-        # shape (N, 2)
-        grid_X_local, grid_Y_local = np.meshgrid(
-             grid_x_local,
-             grid_y_local
-        )
-        target_points = np.column_stack((grid_X_local.ravel(), grid_Y_local.ravel()))
-        
-        # Add a temporary transmitter to be moved around
-        # We'll re-use the same transmitter object
-        
-        # Ensure cleaning up any previous temp objects
-        try:
-             self.scene.remove("tx_temp")
-        except:
-             pass
-             
-        # Add a placeholder transmitter
-        tx = self._Transmitter(
-            name="tx_temp",
-            position=[0, 0, self.rx_height], # Reciprocity: TX at RX height
-            orientation=[0, 0, 0]
-        )
-        self.scene.add(tx)
-        
-        try:
-            for i in range(M):
-                if verbose:
-                    print(f"  Processing sensor {i+1}/{M}")
-                
-                # Move transmitter to sensor location (Reciprocity)
-                # Note: modifying position directly is efficient in Sionna
-                tx.position = [sensor_x_local[i], sensor_y_local[i], self.rx_height]
-                
-                # Compute coverage map
-                # cm_cell_size should match scale loosely, but doesn't have to be exact match to grid
-                # Smaller cell size = better resolution but more memory
-                # We'll use scale as cell size
-                cm_cell_size = (scale, scale)
-                
-                cm = self.scene.coverage_map(
-                    max_depth=self.max_depth,
-                    diffraction=self.diffraction,
-                    num_samples=self.num_samples,
-                    cm_cell_size=cm_cell_size,
-                    check_scene=False
-                )
-                
-                # Coverage map data
-                # cm.path_gain shape: [1, height_cm, width_cm]
-                pg = cm.path_gain.numpy()[0]
-                
-                # Coverage map coordinates
-                # cm.center is center of the map
-                # cm.size is size of the map (meters)
-                # cm.cell_centers contains coordinates
-                
-                cm_centers = cm.cell_centers.numpy() # [height_cm, width_cm, 3]
-                # Extract X and Y coordinates (local)
-                cm_X = cm_centers[:, :, 0]
-                cm_Y = cm_centers[:, :, 1]
-                
-                # Create interpolator
-                # RegularGridInterpolator requires 1D axes
-                # Sionna Coverage Map is regular grid
-                
-                # Unique X and Y coordinates sorted
-                # Note: Sionna cm X accounts for rows or cols? 
-                # usually cm_centers varies X along cols and Y along rows or vice versa
-                
-                x_axis = np.unique(cm_X)
-                y_axis = np.unique(cm_Y)
-                
-                # Check dimensions
-                if pg.shape != (len(y_axis), len(x_axis)):
-                    # Sometimes axes might be swapped or float errors
-                    # Let's try to infer from shape
-                    pass
-                
-                # Convert to dB
-                # pg_db = 10 * np.log10(pg + 1e-30)
-                
-                # Interpolator
-                # RegularGridInterpolator(points, values)
-                # points: tuple of (y, x) or (x, y) depending on data layout
-                # Sionna pg usually (y, x) (row, col)
-                
-                # WARNING: RegularGridInterpolator expects strictly increasing axes
-                # Ensure they are sorted
-                
-                # Construct interpolator
-                # We need to map target_points (local x, local y) to pg_db
-                # If pg_db is (Y, X), interpolator expects (y, x)
-                
-                interp = RegularGridInterpolator((y_axis, x_axis), pg, bounds_error=False, fill_value=0.0)
-                
-                # Query points: (y, x)
-                query_points = target_points[:, [1, 0]] # Swap to (y, x)
-                
-                interpolated_pg = interp(query_points)
-                
-                # Store in A
-                A[i, :] = interpolated_pg
-                
         finally:
             try:
                 self.scene.remove("tx_temp")

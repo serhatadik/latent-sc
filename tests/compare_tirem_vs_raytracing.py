@@ -94,7 +94,7 @@ def compare_models():
     try:
         sionna_model = SionnaModel(config_sionna)
         A_rt = sionna_model.compute_propagation_matrix(
-            sensors, map_shape, scale=scale, verbose=True, method='coverage_map'
+            sensors, map_shape, scale=scale, verbose=True
         )
     except Exception as e:
         print(f"Raytracing failed: {e}")
