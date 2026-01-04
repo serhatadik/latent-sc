@@ -30,7 +30,7 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
                                  proximity_weight=50.0, proximity_decay=50.0,
                                  penalty_type='l1', penalty_param=0.5, sparsity_epsilon=1e-6,
                                  return_linear_scale=False,
-                                 model_type='log_distance', tirem_config_path=None, n_jobs=-1,
+                                 model_type='log_distance', model_config_path=None, feature_config_path=None, n_jobs=-1,
                                  selection_method='max', cluster_distance_m=100.0, cluster_threshold_fraction=0.1,
                                  cluster_max_candidates=100,
                                  dedupe_distance_m=25.0,
@@ -100,9 +100,14 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
         - 'log_distance': Simple log-distance path loss model (default)
         - 'tirem': TIREM terrain-aware propagation model
         - 'raytracing': Sionna ray-tracing propagation model
-    tirem_config_path : str, optional
+    model_config_path : str, optional
         Path to propagation model configuration file.
         Required for model_type='tirem' (TIREM config) or 'raytracing' (Sionna config).
+    feature_config_path : str, optional
+        Path to TIREM configuration file specifically for computing geometric features
+        (LOS, obstacles, etc.) used in 'hetero_geo_aware' whitening.
+        If None, defaults to 'config/tirem_parameters.yaml' to ensure consistent caching
+        regardless of the selected propagation model.
     n_jobs : int, optional
         Number of parallel jobs for TIREM computation, default: -1
     selection_method : {'max', 'cluster'}, optional
@@ -236,20 +241,23 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
         W = None
         
         # Compute geometric features
-        if tirem_config_path is None:
-             # Default fallback if not provided but needed
-             tirem_config_path = 'config/tirem_parameters.yaml'
+        if feature_config_path is None:
+             # Default fallback ensures we share cache across different model selections
+             feature_config_path = 'config/tirem_parameters.yaml'
 
         if verbose:
-            print(f"  Computing geometric features using TIREM (config: {tirem_config_path})...")
+            print(f"  Computing geometric features using TIREM (config: {feature_config_path})...")
             
         from ..propagation.tirem_wrapper import TiremModel
-        # Initialize TIREM model
-        tirem_model = TiremModel(tirem_config_path)
+        # Initialize TIREM model for features
+        # Note: We use a separate config path here so that feature computation
+        # (which always uses TIREM) can share a consistent cache even if 
+        # model_config_path points to a Sionna config.
+        tirem_features_model = TiremModel(feature_config_path)
         
         # Compute features
         # Features: (M, N, 4)
-        geometric_features = tirem_model.compute_geometric_features(
+        geometric_features = tirem_features_model.compute_geometric_features(
             sensor_locations, map_shape, scale=scale, n_jobs=n_jobs, verbose=verbose
         )
         
@@ -270,7 +278,7 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
 
     A_model = compute_propagation_matrix(
         sensor_locations, map_shape, scale=scale,
-        model_type=model_type, config_path=tirem_config_path,
+        model_type=model_type, config_path=model_config_path,
         np_exponent=np_exponent, vectorized=True, n_jobs=n_jobs, verbose=verbose
     )
 

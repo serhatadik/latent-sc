@@ -255,7 +255,7 @@ def run_investigation(transmitters, seed=None, test_mode=False, output_dir=None,
                     return_linear_scale=False,
                     verbose=True,  # Enable verbose to see progress
                     model_type=model_type,
-                    tirem_config_path='config/tirem_parameters.yaml' if model_type == 'tirem' else None,
+                    model_config_path='config/tirem_parameters.yaml' if model_type == 'tirem' else None,
                     n_jobs=-1
                 )
                 print(f"    Reconstruction complete.")
