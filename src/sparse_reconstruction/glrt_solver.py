@@ -13,6 +13,77 @@ import numpy as np
 from .sparse_solver import solve_sparse_reconstruction_scipy
 
 
+def _compute_power_density_weights(residual, sensor_locations, map_shape, scale=1.0,
+                                    sigma_power_m=200.0):
+    """
+    Compute power-weighted spatial density for all grid locations.
+    
+    Uses a Gaussian kernel centered at each sensor, weighted by the absolute 
+    residual power at that sensor. Grid locations near high-residual sensors 
+    receive higher density scores.
+    
+    Parameters
+    ----------
+    residual : ndarray of shape (M,)
+        Residual power at each sensor (observed - predicted). Use absolute value.
+        At iteration 0, this equals observed_powers.
+    sensor_locations : ndarray of shape (M, 2)
+        Sensor coordinates in pixel space (col, row)
+    map_shape : tuple of (height, width)
+        Shape of the reconstruction grid
+    scale : float
+        Pixel-to-meter scaling factor
+    sigma_power_m : float
+        Characteristic distance scale in meters for the Gaussian kernel.
+        Sensor influence decays to ~37% at this distance.
+        
+    Returns
+    -------
+    density_weights : ndarray of shape (N,)
+        Power density at each grid location. Higher values indicate 
+        proximity to high-power sensors.
+    """
+    height, width = map_shape
+    N = height * width
+    M = len(sensor_locations)
+    
+    # Convert sigma to pixel units
+    sigma_power_px = sigma_power_m / scale
+    sigma_sq = 2 * sigma_power_px ** 2  # Pre-compute for Gaussian exp(-d²/(2σ²))
+    
+    # Absolute residual as power signal
+    power_signal = np.abs(residual)  # (M,)
+    
+    # Create grid coordinates (row, col) for all N grid points
+    grid_rows, grid_cols = np.divmod(np.arange(N), width)
+    grid_coords = np.column_stack((grid_cols, grid_rows))  # (N, 2) in (col, row) format
+    
+    # Compute density: sum over sensors of power * exp(-dist²/(2σ²))
+    # For efficiency with large N, use vectorized computation
+    # sensor_locations is (M, 2) in (col, row) format
+    
+    density_weights = np.zeros(N)
+    
+    for k in range(M):
+        sensor_col, sensor_row = sensor_locations[k]
+        
+        # Squared distance from sensor k to all grid points
+        dist_sq = (grid_coords[:, 0] - sensor_col)**2 + (grid_coords[:, 1] - sensor_row)**2
+        
+        # Gaussian kernel
+        kernel = np.exp(-dist_sq / sigma_sq)
+        
+        # Add contribution weighted by power
+        density_weights += power_signal[k] * kernel
+    
+    # Normalize to [0, 1] range
+    max_density = density_weights.max()
+    if max_density > 1e-20:
+        density_weights = density_weights / max_density
+    
+    return density_weights
+
+
 def _find_clusters_and_select_centroid(scores, map_shape, scale=1.0,
                                         threshold_fraction=0.1,
                                         cluster_distance_m=100.0,
@@ -174,6 +245,8 @@ def solve_iterative_glrt(A_model, W, observed_powers,
                          selection_method='max', map_shape=None, scale=1.0,
                          cluster_distance_m=100.0, cluster_threshold_fraction=0.1,
                          cluster_max_candidates=100, dedupe_distance_m=25.0,
+                         sensor_locations=None, power_density_sigma_m=200.0,
+                         power_density_threshold=0.3,
                          verbose=True, **solver_kwargs):
     """
     Solve for transmit power using Sequential "Add-One" Detection (GLRT).
@@ -191,13 +264,15 @@ def solve_iterative_glrt(A_model, W, observed_powers,
     glrt_threshold : float, optional
         Minimum normalized GLRT score (R^2) to accept a new transmitter. 
         Range [0, 1]. Default: 4.0 (400% variance explained - usually requires unnormalized score)
-    selection_method : {'max', 'cluster'}, optional
+    selection_method : {'max', 'cluster', 'power_cluster'}, optional
         Method for selecting the best candidate. Default: 'max'
         - 'max': Select the single location with maximum GLRT score
         - 'cluster': Identify clusters of high-scoring locations and select 
           the centroid of the strongest cluster (by sum of scores)
+        - 'power_cluster': First filter candidates to high power-density regions,
+          then apply cluster selection. Uses residual power to adapt across iterations.
     map_shape : tuple of (height, width), optional
-        Shape of the reconstruction grid. Required if selection_method='cluster'.
+        Shape of the reconstruction grid. Required if selection_method='cluster' or 'power_cluster'.
     scale : float, optional
         Pixel-to-meter scaling factor. Default: 1.0. Used for cluster distance calculation.
     cluster_distance_m : float, optional
@@ -213,6 +288,15 @@ def solve_iterative_glrt(A_model, W, observed_powers,
         Distance threshold in meters for deduplicating transmitters after iterations.
         Transmitters within this distance of each other are merged, keeping the one
         added earliest. Default: 25.0. Set to 0 or None to disable deduplication.
+    sensor_locations : ndarray of shape (M, 2), optional
+        Sensor coordinates in pixel space (col, row). Required for power_cluster method.
+    power_density_sigma_m : float, optional
+        Characteristic distance scale in meters for power density Gaussian kernel.
+        Default: 200.0. Only used when selection_method='power_cluster'.
+    power_density_threshold : float, optional
+        Fraction of max density below which candidates are excluded. Default: 0.3.
+        E.g., 0.3 means only candidates in regions with density >= 30% of max density 
+        are considered. Only used when selection_method='power_cluster'.
     verbose : bool, optional
         Print progress. Default: True
     **solver_kwargs
@@ -498,7 +582,57 @@ def solve_iterative_glrt(A_model, W, observed_powers,
         
         # 2. Select best candidate
         cluster_info = None
-        if selection_method == 'cluster':
+        power_density_info = None
+        
+        if selection_method == 'power_cluster':
+            # Power-aware cluster selection
+            if map_shape is None:
+                raise ValueError("map_shape is required when selection_method='power_cluster'")
+            if sensor_locations is None:
+                raise ValueError("sensor_locations is required when selection_method='power_cluster'")
+            
+            # Compute power density using current residual
+            power_density = _compute_power_density_weights(
+                residual, sensor_locations, map_shape, 
+                scale=scale, sigma_power_m=power_density_sigma_m
+            )
+            
+            # Create mask for low-density regions (exclude candidates in low-power areas)
+            density_mask = power_density < power_density_threshold
+            n_masked = np.sum(density_mask)
+            
+            if verbose and k == 1:  # Only print on first iteration
+                print(f"  Power density threshold: {power_density_threshold:.1%}")
+                print(f"  Candidates masked (low density): {n_masked}/{len(power_density)}")
+            
+            # Apply density mask to scores (mask out low-density candidates)
+            scores_masked = scores.copy()
+            scores_masked[density_mask] = -1.0
+            
+            # Check if we have any valid candidates after masking
+            n_valid = np.sum(scores_masked > 0)
+            if n_valid == 0:
+                # Fallback: if all candidates masked, use original scores
+                if verbose:
+                    print(f"  Warning: All candidates masked by density. Falling back to cluster.")
+                scores_masked = scores
+            
+            # Apply cluster selection on masked scores
+            best_idx, cluster_info = _find_clusters_and_select_centroid(
+                scores_masked, map_shape, scale=scale,
+                threshold_fraction=cluster_threshold_fraction,
+                cluster_distance_m=cluster_distance_m,
+                max_candidates=cluster_max_candidates,
+                excluded_indices=support + (list(np.where(exclusion_mask)[0]) if exclusion_mask is not None else [])
+            )
+            
+            power_density_info = {
+                'n_masked': int(n_masked),
+                'n_valid': int(n_valid),
+                'selected_density': float(power_density[best_idx]),
+            }
+            
+        elif selection_method == 'cluster':
             if map_shape is None:
                 raise ValueError("map_shape is required when selection_method='cluster'")
             best_idx, cluster_info = _find_clusters_and_select_centroid(
@@ -565,6 +699,8 @@ def solve_iterative_glrt(A_model, W, observed_powers,
             if cluster_info is not None:
                 print(f"  Selection method: {cluster_info['method']}")
                 print(f"  Clusters found: {cluster_info['n_clusters']}, Selected cluster size: {cluster_info['cluster_size']}")
+            if power_density_info is not None:
+                print(f"  Power density at selected: {power_density_info['selected_density']:.2%}")
 
         # Store top-K candidates for visualization (uses cluster_max_candidates)
         # This ensures consistency: same number of candidates for clustering and visualization
@@ -585,7 +721,8 @@ def solve_iterative_glrt(A_model, W, observed_powers,
             'selected_index': best_idx,
             'selected_score': best_score,
             'normalized_score': normalized_val_for_history,
-            'cluster_info': cluster_info
+            'cluster_info': cluster_info,
+            'power_density_info': power_density_info
         })
         
         # 3. Test threshold
