@@ -19,6 +19,14 @@ Usage:
     python scripts/comprehensive_parameter_sweep.py --tx-counts 1,2,3  # Specific TX counts
 """
 
+# IMPORTANT: Set threading env vars BEFORE importing numpy to prevent deadlocks
+# when using multiprocessing on Windows
+import os
+os.environ['OMP_NUM_THREADS'] = '1'
+os.environ['MKL_NUM_THREADS'] = '1'
+os.environ['OPENBLAS_NUM_THREADS'] = '1'
+os.environ['NUMEXPR_NUM_THREADS'] = '1'
+
 import numpy as np
 import pandas as pd
 import matplotlib
@@ -29,6 +37,10 @@ import sys
 import time
 import argparse
 import re
+import os
+import multiprocessing
+from joblib import Parallel, delayed
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime
 from collections import defaultdict
@@ -278,27 +290,22 @@ def define_sigma_noise_strategies(observed_powers_linear: np.ndarray, test_mode:
         }
     
     # Full set of strategies
+    # Reduced to top 5 based on parameter sweep analysis:
+    # - fixed_1e-9: 28.1% times best (lowest ALE per directory)
+    # - fixed_5e-9: 9.8% success rate, 14.1% times best
+    # - 10x_min: 8.7% success rate, 10.9% times best
+    # - 20x_min: 9.9% success rate, 9.4% times best
+    # - 0.1_mean: 11.5% success rate (highest), achieved best overall ALE (30.4m)
     strategies = {
-        # Fixed values (common choices)
-        'fixed_1e-10': 1e-10,
+        # Fixed values (best performers)
         'fixed_1e-9': 1e-9,
         'fixed_5e-9': 5e-9,
-        'fixed_1e-8': 1e-8,
-        'fixed_1e-7': 1e-7,
         
-        # Min-power based strategies (multiples of min observed power)
-        '0.5x_min': 0.5 * min_power,
-        'min_power': min_power,
-        '2x_min': 2.0 * min_power,
-        '5x_min': 5.0 * min_power,
+        # Min-power based (dynamic, scaled to data)
         '10x_min': 10.0 * min_power,
         '20x_min': 20.0 * min_power,
         
-        # Sqrt-based (often used for Poisson-like noise)
-        'sqrt_min': np.sqrt(min_power),
-        'sqrt_mean': np.sqrt(mean_power),
-        
-        # Mean-power based
+        # Mean-power based (best success rate)
         '0.01_mean': 0.01 * mean_power,
         '0.1_mean': 0.1 * mean_power,
     }
@@ -452,6 +459,7 @@ def run_single_experiment(
     selection_method: str,
     feature_rho: List[float],
     feature_rho_name: str,
+    strategy_name: str = '',
     model_type: str = 'tirem',
     eta: float = 0.01,
     output_dir: Optional[Path] = None,
@@ -547,7 +555,7 @@ def run_single_experiment(
         
         # Save GLRT visualization if requested
         if save_visualization and output_dir is not None:
-            experiment_name = f"{data_info['name']}_{feature_rho_name}_{selection_method}"
+            experiment_name = f"{data_info['name']}_{strategy_name}_{feature_rho_name}_{selection_method}"
             save_glrt_visualization(
                 info=info,
                 map_data=map_data,
@@ -607,6 +615,140 @@ def run_single_experiment(
             traceback.print_exc()
         return None
 
+def _worker_init():
+    """Initialize worker process - disable numpy threading to prevent deadlocks."""
+    import os
+    os.environ['OMP_NUM_THREADS'] = '1'
+    os.environ['MKL_NUM_THREADS'] = '1'
+    os.environ['OPENBLAS_NUM_THREADS'] = '1'
+    os.environ['NUMEXPR_NUM_THREADS'] = '1'
+
+
+def process_single_directory(args: Tuple) -> Tuple[List[Dict], str]:
+    """
+    Process a single data directory with all parameter combinations.
+    
+    This is a top-level function for pickling compatibility with multiprocessing.
+    All Path objects are converted to strings before being passed here.
+    
+    Parameters
+    ----------
+    args : tuple
+        (data_info_serializable, config, map_data, all_tx_locations, output_dir_str,
+         test_mode, model_type, eta, save_visualizations, feature_rho_configs,
+         selection_methods)
+    
+    Returns
+    -------
+    tuple
+        (list of result dictionaries, skip_reason or None)
+    """
+    (data_info_serializable, config, map_data, all_tx_locations, output_dir_str,
+     test_mode, model_type, eta, save_visualizations, feature_rho_configs,
+     selection_methods) = args
+    
+    # Reconstruct data_info with Path object
+    data_info = data_info_serializable.copy()
+    data_info['path'] = Path(data_info['path_str'])
+    output_dir = Path(output_dir_str)
+    
+    results = []
+    dir_name = data_info['name']
+    transmitters = data_info['transmitters']
+    tx_underscore = "_".join(transmitters)
+    tx_count = len(transmitters)
+    
+    # Load power data for strategy definition
+    powers_file = data_info['path'] / f"{tx_underscore}_avg_powers.npy"
+    if not powers_file.exists():
+        return results, "no powers file"
+    
+    observed_powers_dB = np.load(powers_file)
+    observed_powers_linear = dbm_to_linear(observed_powers_dB)
+    
+    # Check if TIREM cache exists (for tirem model)
+    if model_type == 'tirem':
+        seed = data_info['seed']
+        if seed is not None:
+            config_path = f'config/monitoring_locations_{tx_underscore}_seed_{seed}.yaml'
+        else:
+            config_path = f'config/monitoring_locations_{tx_underscore}.yaml'
+        
+        if not Path(config_path).exists():
+            return results, "no config file"
+        
+        locations_config = load_monitoring_locations(
+            config_path=config_path,
+            map_data=map_data
+        )
+        sensor_locations = get_sensor_locations_array(locations_config)
+        
+        features_cached, prop_cached = check_tirem_cache_exists(
+            sensor_locations=sensor_locations,
+            map_shape=map_data['shape'],
+            scale=config['spatial']['proxel_size'],
+            tirem_config_path='config/tirem_parameters.yaml',
+        )
+        
+        if not features_cached or not prop_cached:
+            return results, f"no TIREM cache (features={features_cached}, prop={prop_cached})"
+    
+    # Define strategies based on this dataset's observations
+    strategies = define_sigma_noise_strategies(observed_powers_linear, test_mode=test_mode)
+    
+    attempted = 0
+    failed = 0
+    
+    try:
+        for strategy_name, sigma_noise in strategies.items():
+            for sel_method in selection_methods:
+                for rho_name, feature_rho in feature_rho_configs.items():
+                    attempted += 1
+                    try:
+                        result = run_single_experiment(
+                            data_info=data_info,
+                            config=config,
+                            map_data=map_data,
+                            all_tx_locations=all_tx_locations,
+                            sigma_noise=sigma_noise,
+                            selection_method=sel_method,
+                            feature_rho=feature_rho,
+                            feature_rho_name=rho_name,
+                            strategy_name=strategy_name,
+                            model_type=model_type,
+                            eta=eta,
+                            output_dir=output_dir,
+                            save_visualization=save_visualizations,
+                            verbose=False,
+                        )
+                        
+                        if result is not None:
+                            result.update({
+                                'dir_name': dir_name,
+                                'tx_count': tx_count,
+                                'transmitters': ','.join(transmitters),
+                                'seed': data_info['seed'],
+                                'strategy': strategy_name,
+                                'selection_method': sel_method,
+                                'feature_rho': rho_name,
+                                'sigma_noise': sigma_noise,
+                                'sigma_noise_dB': 10 * np.log10(sigma_noise) if sigma_noise > 0 else -np.inf,
+                            })
+                            results.append(result)
+                        else:
+                            failed += 1
+                    except Exception as inner_exc:
+                        failed += 1
+                        # Continue to next experiment
+    except Exception as e:
+        import traceback
+        return results, f"EXCEPTION after {attempted} attempts ({failed} failed): {e}\n{traceback.format_exc()}"
+    
+    if failed > 0 and len(results) == 0:
+        return results, f"all {attempted} experiments failed"
+    
+    return results, None  # None = no skip reason, processing succeeded
+
 
 def run_comprehensive_sweep(
     grouped_dirs: Dict[int, List[Dict]],
@@ -621,9 +763,16 @@ def run_comprehensive_sweep(
     eta: float = 0.01,
     save_visualizations: bool = True,
     verbose: bool = True,
+    n_workers: int = 1,
 ) -> pd.DataFrame:
     """
     Run comprehensive parameter sweep across all directories.
+    
+    Parameters
+    ----------
+    n_workers : int, optional
+        Number of parallel workers. Default: 1 (sequential).
+        Set to -1 to use all CPUs minus 1.
     
     Returns
     -------
@@ -643,146 +792,109 @@ def run_comprehensive_sweep(
     if tx_counts_filter:
         grouped_dirs = {k: v for k, v in grouped_dirs.items() if k in tx_counts_filter}
     
-    # Count total experiments for progress
-    total_dirs = sum(
-        min(len(dirs), max_dirs_per_count) if max_dirs_per_count else len(dirs)
-        for dirs in grouped_dirs.values()
-    )
+    # Flatten directories list with TX count info
+    all_dirs = []
+    for tx_count in sorted(grouped_dirs.keys()):
+        dirs = grouped_dirs[tx_count]
+        if max_dirs_per_count:
+            dirs = dirs[:max_dirs_per_count]
+        all_dirs.extend(dirs)
+    
+    total_dirs = len(all_dirs)
+    
+    # Determine actual worker count
+    if n_workers == -1:
+        n_workers = max(1, os.cpu_count() - 1)
+    n_workers = min(n_workers, total_dirs)  # Don't use more workers than dirs
     
     print(f"\n{'='*70}")
     print("COMPREHENSIVE PARAMETER SWEEP")
     print(f"{'='*70}")
     print(f"TX counts to process: {sorted(grouped_dirs.keys())}")
     print(f"Total directories: {total_dirs}")
+    print(f"Workers: {n_workers}")
     print(f"Test mode: {test_mode}")
     print(f"Model type: {model_type}")
     print(f"Whitening method: hetero_geo_aware")
     print(f"Feature rho configs: {list(feature_rho_configs.keys())}")
     
-    dir_counter = 0
     start_time = time.time()
     
-    # Track which directories have been visualized (only visualize first strategy combo per dir)
-    visualized_dirs = set()
+    # Prepare serializable arguments for each directory
+    # Convert Path objects to strings to avoid pickling issues on Windows
+    output_dir_str = str(output_dir)
     
-    for tx_count in sorted(grouped_dirs.keys()):
-        dirs = grouped_dirs[tx_count]
-        if max_dirs_per_count:
-            dirs = dirs[:max_dirs_per_count]
-        
-        print(f"\n{'-'*40}")
-        print(f"TX COUNT: {tx_count} ({len(dirs)} directories)")
-        print(f"{'-'*40}")
-        
-        for data_info in dirs:
-            dir_counter += 1
-            dir_name = data_info['name']
-            transmitters = data_info['transmitters']
-            tx_underscore = "_".join(transmitters)
+    task_args = []
+    for data_info in all_dirs:
+        # Create serializable copy of data_info
+        data_info_serializable = {
+            'name': data_info['name'],
+            'transmitters': data_info['transmitters'],
+            'seed': data_info['seed'],
+            'path_str': str(data_info['path']),  # Convert Path to string
+        }
+        task_args.append((
+            data_info_serializable,
+            config,
+            map_data,
+            all_tx_locations,
+            output_dir_str,
+            test_mode,
+            model_type,
+            eta,
+            save_visualizations,
+            feature_rho_configs,
+            selection_methods,
+        ))
+    
+    if n_workers == 1:
+        # Sequential execution
+        print("\nRunning in sequential mode...")
+        for i, args in enumerate(task_args):
+            dir_name = args[0]['name']
+            print(f"  [{i+1}/{total_dirs}] Processing {dir_name}...", end=" ", flush=True)
             
-            # Load power data for strategy definition
-            powers_file = data_info['path'] / f"{tx_underscore}_avg_powers.npy"
-            if not powers_file.exists():
-                print(f"  [{dir_counter}/{total_dirs}] Skipping {dir_name} - no powers file")
-                continue
+            dir_results, skip_reason = process_single_directory(args)
+            results.extend(dir_results)
             
-            observed_powers_dB = np.load(powers_file)
-            observed_powers_linear = dbm_to_linear(observed_powers_dB)
-            
-            # Check if TIREM cache exists (for tirem model)
-            if model_type == 'tirem':
-                # Load sensor locations for cache check
-                seed = data_info['seed']
-                if seed is not None:
-                    config_path = f'config/monitoring_locations_{tx_underscore}_seed_{seed}.yaml'
-                else:
-                    config_path = f'config/monitoring_locations_{tx_underscore}.yaml'
-                
-                if not Path(config_path).exists():
-                    print(f"  [{dir_counter}/{total_dirs}] Skipping {dir_name} - no config file")
-                    continue
-                
-                locations_config = load_monitoring_locations(
-                    config_path=config_path,
-                    map_data=map_data
-                )
-                sensor_locations = get_sensor_locations_array(locations_config)
-                
-                features_cached, prop_cached = check_tirem_cache_exists(
-                    sensor_locations=sensor_locations,
-                    map_shape=map_data['shape'],
-                    scale=config['spatial']['proxel_size'],
-                    tirem_config_path='config/tirem_parameters.yaml',
-                )
-                
-                if not features_cached or not prop_cached:
-                    print(f"  [{dir_counter}/{total_dirs}] Skipping {dir_name} - no TIREM cache "
-                          f"(features={features_cached}, prop={prop_cached})")
-                    continue
-            
-            # Define strategies based on this dataset's observations
-            strategies = define_sigma_noise_strategies(observed_powers_linear, test_mode=test_mode)
-            
-            print(f"\n  [{dir_counter}/{total_dirs}] {dir_name}")
-            print(f"      TX: {transmitters}")
-            print(f"      Strategies: {len(strategies)}, Selection methods: {len(selection_methods)}, Feature rhos: {len(feature_rho_configs)}")
-            
-            for strategy_name, sigma_noise in strategies.items():
-                for sel_method in selection_methods:
-                    for rho_name, feature_rho in feature_rho_configs.items():
-                        if verbose:
-                            print(f"      Running: {strategy_name} / {sel_method} / {rho_name}...", end=" ", flush=True)
-                        
-                        # Only save visualization for first strategy combo per directory
-                        should_visualize = save_visualizations and (dir_name not in visualized_dirs)
-                        
-                        result = run_single_experiment(
-                            data_info=data_info,
-                            config=config,
-                            map_data=map_data,
-                            all_tx_locations=all_tx_locations,
-                            sigma_noise=sigma_noise,
-                            selection_method=sel_method,
-                            feature_rho=feature_rho,
-                            feature_rho_name=rho_name,
-                            model_type=model_type,
-                            eta=eta,
-                            output_dir=output_dir,
-                            save_visualization=should_visualize,
-                            verbose=False,
-                        )
-                        
-                        if result is not None:
-                            if should_visualize:
-                                visualized_dirs.add(dir_name)
-                            
-                            result.update({
-                                'dir_name': dir_name,
-                                'tx_count': tx_count,
-                                'transmitters': ','.join(transmitters),
-                                'seed': data_info['seed'],
-                                'strategy': strategy_name,
-                                'selection_method': sel_method,
-                                'feature_rho': rho_name,
-                                'sigma_noise': sigma_noise,
-                                'sigma_noise_dB': 10 * np.log10(sigma_noise) if sigma_noise > 0 else -np.inf,
-                            })
-                            results.append(result)
-                            
-                            if verbose:
-                                print(f"ALE={result['ale']:.1f}m, Pd={result['pd']*100:.0f}%")
-                        else:
-                            if verbose:
-                                print("FAILED")
+            if skip_reason:
+                print(f"SKIPPED ({skip_reason})")
+            else:
+                print(f"{len(dir_results)} experiments")
             
             # Progress estimate
             elapsed = time.time() - start_time
-            if dir_counter > 0:
-                avg_time = elapsed / dir_counter
-                remaining = (total_dirs - dir_counter) * avg_time
-                print(f"      Progress: {dir_counter}/{total_dirs} | "
+            if i > 0:
+                avg_time = elapsed / (i + 1)
+                remaining = (total_dirs - i - 1) * avg_time
+                print(f"      Progress: {i+1}/{total_dirs} | "
                       f"Elapsed: {elapsed/60:.1f}min | "
                       f"Remaining: ~{remaining/60:.1f}min")
+    else:
+        # Parallel execution using joblib
+        # joblib properly handles numpy threading issues on Windows
+        print(f"\nRunning in parallel mode with {n_workers} workers...")
+        
+        # Run in parallel with joblib (verbose=0 for cleaner output)
+        parallel_results = Parallel(n_jobs=n_workers, backend='loky', verbose=0)(
+            delayed(process_single_directory)(args) for args in task_args
+        )
+        
+        # Process results and count successes/skipped
+        n_skipped = 0
+        n_success = 0
+        for dir_results, skip_reason in parallel_results:
+            if skip_reason:
+                n_skipped += 1
+            else:
+                n_success += 1
+                results.extend(dir_results)
+        
+        print(f"  Directories processed: {n_success} success, {n_skipped} skipped")
+    
+    elapsed_total = time.time() - start_time
+    print(f"\nSweep completed in {elapsed_total/60:.1f} minutes")
+    print(f"Total experiments collected: {len(results)}")
     
     return pd.DataFrame(results)
 
@@ -1044,7 +1156,7 @@ def generate_analysis_report(
     
     # Write report
     report_path = output_dir / "analysis_report.md"
-    with open(report_path, 'w') as f:
+    with open(report_path, 'w', encoding='utf-8') as f:
         f.write('\n'.join(report_lines))
     
     return str(report_path)
@@ -1173,6 +1285,10 @@ def main():
         '--no-visualizations', action='store_true',
         help='Disable GLRT visualization generation'
     )
+    parser.add_argument(
+        '--workers', type=int, default=1,
+        help='Number of parallel workers (default: 1 for sequential, -1 for all CPUs minus 1)'
+    )
     
     args = parser.parse_args()
     
@@ -1242,6 +1358,7 @@ def main():
         eta=args.eta,
         save_visualizations=not args.no_visualizations,
         verbose=True,
+        n_workers=args.workers,
     )
     
     if len(results_df) == 0:
@@ -1297,4 +1414,6 @@ def main():
 
 
 if __name__ == "__main__":
+    # Required for Windows multiprocessing support
+    multiprocessing.freeze_support()
     main()
