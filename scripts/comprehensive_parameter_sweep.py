@@ -76,6 +76,9 @@ FEATURE_RHO_CONFIGS = {
     'no_normalization': [1e10, 1e10, 1e10, 1e10],  # No normalization
 }
 
+# Power density thresholds to sweep
+POWER_DENSITY_THRESHOLDS = [0.01, 0.05, 0.1, 0.2, 0.3]
+
 # Cache directory for TIREM
 _SCRIPT_DIR = Path(__file__).parent.resolve()
 _PROJECT_ROOT = _SCRIPT_DIR.parent
@@ -448,6 +451,87 @@ def save_glrt_visualization(
         fig_path = vis_dir / f"iter_{item['iteration']:02d}.png"
         plt.savefig(fig_path, dpi=150, bbox_inches='tight')
         plt.close(fig)
+        
+        # === Power Density Visualization (separate figure) ===
+        power_density_info = item.get('power_density_info')
+        if power_density_info is not None and 'power_density' in power_density_info:
+            # Create power density map visualization
+            power_density = power_density_info['power_density']
+            density_mask = power_density_info['density_mask']
+            threshold = power_density_info['threshold']
+            
+            # Reshape to 2D
+            density_map = power_density.reshape((height, width))
+            mask_map = density_mask.reshape((height, width))
+            
+            # Create masked density (areas below threshold shown as NaN)
+            density_thresholded = density_map.copy()
+            density_thresholded[mask_map] = np.nan  # Mask out low-density areas
+            
+            fig = plt.figure(figsize=(14, 8))
+            ax = fig.gca()
+            
+            # Plot the full density map with transparency
+            im_full = ax.imshow(density_map, origin='lower', cmap='Blues', alpha=0.3,
+                               vmin=0, vmax=1, aspect='auto')
+            
+            # Overlay the thresholded (valid) density regions
+            im_valid = ax.imshow(density_thresholded, origin='lower', cmap='Reds',
+                                vmin=threshold, vmax=1, aspect='auto')
+            
+            # Plot sensors with power indication
+            scatter = ax.scatter(sensor_locations[:, 0], sensor_locations[:, 1],
+                                c=observed_powers_dB, s=200, edgecolor='black',
+                                linewidth=2, cmap='hot', label='Sensors (by power)', zorder=8)
+            
+            # Plot true TX locations
+            if len(tx_coords) > 0:
+                ax.scatter(tx_coords[:, 0], tx_coords[:, 1],
+                          marker='x', s=250, c='blue', linewidth=4,
+                          label='True TX Locations', zorder=10)
+            
+            # Highlight selected candidate
+            sel_row, sel_col = np.unravel_index(item['selected_index'], (height, width))
+            ax.scatter([sel_col], [sel_row], c='magenta', marker='*', s=500,
+                      edgecolor='white', linewidth=2, label='Selected', zorder=11)
+            
+            # Colorbar for density
+            cbar = plt.colorbar(im_valid, ax=ax, label='Power Density (thresholded)', shrink=0.8)
+            cbar.ax.tick_params(labelsize=14)
+            cbar.set_label('Power Density (above threshold)', size=14)
+            
+            # UTM ticks
+            UTM_lat = map_data['UTM_lat']
+            UTM_long = map_data['UTM_long']
+            interval = max(1, len(UTM_lat) // 5)
+            tick_values = list(range(0, len(UTM_lat), interval))
+            tick_labels = ['{:.1f}'.format(lat) for lat in UTM_lat[::interval]]
+            plt.xticks(ticks=tick_values, labels=tick_labels, fontsize=12, rotation=0)
+            
+            interval = max(1, len(UTM_long) // 5)
+            tick_values = list(range(0, len(UTM_long), interval))
+            tick_labels = ['{:.1f}'.format(lat) for lat in UTM_long[::interval]]
+            plt.yticks(ticks=[0] + tick_values[1:], labels=[""] + tick_labels[1:], fontsize=12, rotation=90)
+            
+            ax.set_xlim([0, width])
+            ax.set_ylim([0, height])
+            
+            plt.xlabel('UTM$_E$ [m]', fontsize=16, labelpad=10)
+            plt.ylabel('UTM$_N$ [m]', fontsize=16, labelpad=10)
+            
+            n_masked = power_density_info['n_masked']
+            n_total = len(power_density)
+            pct_valid = (n_total - n_masked) / n_total * 100
+            
+            plt.title(f"Power Density Map - Iter {item['iteration']} | "
+                     f"Threshold: {threshold:.0%} | Valid: {pct_valid:.1f}%", fontsize=16)
+            
+            plt.legend(loc='upper right', fontsize=11)
+            
+            # Save figure
+            fig_path = vis_dir / f"power_density_iter_{item['iteration']:02d}.png"
+            plt.savefig(fig_path, dpi=150, bbox_inches='tight')
+            plt.close(fig)
 
 
 def run_single_experiment(
@@ -457,8 +541,10 @@ def run_single_experiment(
     all_tx_locations: Dict,
     sigma_noise: float,
     selection_method: str,
+    use_power_filtering: bool,
     feature_rho: List[float],
     feature_rho_name: str,
+    power_density_threshold: float = 0.3,
     strategy_name: str = '',
     model_type: str = 'tirem',
     eta: float = 0.01,
@@ -540,6 +626,8 @@ def run_single_experiment(
             feature_rho=feature_rho,
             solver='glrt',
             selection_method=selection_method,
+            use_power_filtering=use_power_filtering,
+            power_density_threshold=power_density_threshold,
             cluster_max_candidates=30,
             glrt_max_iter=len(transmitters) + 1,
             glrt_threshold=4.0,
@@ -555,7 +643,11 @@ def run_single_experiment(
         
         # Save GLRT visualization if requested
         if save_visualization and output_dir is not None:
-            experiment_name = f"{data_info['name']}_{strategy_name}_{feature_rho_name}_{selection_method}"
+            pf_suffix = ''
+            if use_power_filtering:
+                pf_suffix = f'_pf_thresh{power_density_threshold}'
+            
+            experiment_name = f"{data_info['name']}_{strategy_name}_{feature_rho_name}_{selection_method}{pf_suffix}"
             save_glrt_visualization(
                 info=info,
                 map_data=map_data,
@@ -645,7 +737,7 @@ def process_single_directory(args: Tuple) -> Tuple[List[Dict], str]:
     """
     (data_info_serializable, config, map_data, all_tx_locations, output_dir_str,
      test_mode, model_type, eta, save_visualizations, feature_rho_configs,
-     selection_methods) = args
+     selection_configs, power_thresholds) = args
     
     # Reconstruct data_info with Path object
     data_info = data_info_serializable.copy()
@@ -701,44 +793,53 @@ def process_single_directory(args: Tuple) -> Tuple[List[Dict], str]:
     
     try:
         for strategy_name, sigma_noise in strategies.items():
-            for sel_method in selection_methods:
-                for rho_name, feature_rho in feature_rho_configs.items():
-                    attempted += 1
-                    try:
-                        result = run_single_experiment(
-                            data_info=data_info,
-                            config=config,
-                            map_data=map_data,
-                            all_tx_locations=all_tx_locations,
-                            sigma_noise=sigma_noise,
-                            selection_method=sel_method,
-                            feature_rho=feature_rho,
-                            feature_rho_name=rho_name,
-                            strategy_name=strategy_name,
-                            model_type=model_type,
-                            eta=eta,
-                            output_dir=output_dir,
-                            save_visualization=save_visualizations,
-                            verbose=False,
-                        )
-                        
-                        if result is not None:
-                            result.update({
-                                'dir_name': dir_name,
-                                'tx_count': tx_count,
-                                'transmitters': ','.join(transmitters),
-                                'seed': data_info['seed'],
-                                'strategy': strategy_name,
-                                'selection_method': sel_method,
-                                'feature_rho': rho_name,
-                                'sigma_noise': sigma_noise,
-                                'sigma_noise_dB': 10 * np.log10(sigma_noise) if sigma_noise > 0 else -np.inf,
-                            })
-                            results.append(result)
-                        else:
+            for sel_method, use_pf in selection_configs:
+                # Determine thresholds to test for this selection config
+                # If PF is enabled, test all thresholds. If disabled, test only one (value doesn't matter).
+                thresholds_to_test = power_thresholds if use_pf else [power_thresholds[0]]
+                
+                for threshold in thresholds_to_test:
+                    for rho_name, feature_rho in feature_rho_configs.items():
+                        attempted += 1
+                        try:
+                            result = run_single_experiment(
+                                data_info=data_info,
+                                config=config,
+                                map_data=map_data,
+                                all_tx_locations=all_tx_locations,
+                                sigma_noise=sigma_noise,
+                                selection_method=sel_method,
+                                use_power_filtering=use_pf,
+                                feature_rho=feature_rho,
+                                feature_rho_name=rho_name,
+                                strategy_name=strategy_name,
+                                model_type=model_type,
+                                eta=eta,
+                                output_dir=output_dir,
+                                save_visualization=save_visualizations,
+                                verbose=False,
+                                power_density_threshold=threshold,
+                            )
+                            
+                            if result is not None:
+                                result.update({
+                                    'dir_name': dir_name,
+                                    'tx_count': tx_count,
+                                    'transmitters': ','.join(transmitters),
+                                    'seed': data_info['seed'],
+                                    'strategy': strategy_name,
+                                    'selection_method': sel_method,
+                                    'power_filtering': use_pf,
+                                    'power_threshold': threshold if use_pf else float('nan'),
+                                    'feature_rho': rho_name,
+                                    'sigma_noise': sigma_noise,
+                                    'sigma_noise_dB': 10 * np.log10(sigma_noise) if sigma_noise > 0 else -np.inf,
+                                })
+                                results.append(result)
+                            else:
+                                failed += 1
+                        except Exception as inner_exc:
                             failed += 1
-                    except Exception as inner_exc:
-                        failed += 1
                         # Continue to next experiment
     except Exception as e:
         import traceback
@@ -764,6 +865,7 @@ def run_comprehensive_sweep(
     save_visualizations: bool = True,
     verbose: bool = True,
     n_workers: int = 1,
+    power_thresholds: List[float] = None,
 ) -> pd.DataFrame:
     """
     Run comprehensive parameter sweep across all directories.
@@ -780,7 +882,13 @@ def run_comprehensive_sweep(
         Results dataframe with all experiments
     """
     results = []
-    selection_methods = ['max', 'cluster']
+    # Selection configurations: (method, use_power_filtering)
+    selection_configs = [
+        ('max', False),
+        ('cluster', False),
+        ('max', True),
+        ('cluster', True),
+    ]
     
     # Feature rho configurations
     feature_rho_configs = FEATURE_RHO_CONFIGS
@@ -844,7 +952,8 @@ def run_comprehensive_sweep(
             eta,
             save_visualizations,
             feature_rho_configs,
-            selection_methods,
+            selection_configs,
+            power_thresholds,
         ))
     
     if n_workers == 1:
@@ -913,8 +1022,8 @@ def analyze_by_tx_count(results_df: pd.DataFrame) -> Dict[int, pd.DataFrame]:
     for tx_count in sorted(results_df['tx_count'].unique()):
         df = results_df[results_df['tx_count'] == tx_count]
         
-        # Group by strategy, selection method, and feature_rho
-        grouped = df.groupby(['strategy', 'selection_method', 'feature_rho']).agg({
+        # Group by strategy, selection method, power filtering, threshold, and feature_rho
+        grouped = df.groupby(['strategy', 'selection_method', 'power_filtering', 'power_threshold', 'feature_rho'], dropna=False).agg({
             'ale': ['mean', 'std', 'min', 'max', 'count'],
             'pd': ['mean', 'std'],
             'precision': ['mean', 'std'],
@@ -948,8 +1057,8 @@ def analyze_universal(results_df: pd.DataFrame) -> pd.DataFrame:
     pd.DataFrame
         Summary dataframe
     """
-    # Group by strategy, selection method, and feature_rho
-    grouped = results_df.groupby(['strategy', 'selection_method', 'feature_rho']).agg({
+    # Group by strategy, selection method, power filtering, threshold, and feature_rho
+    grouped = results_df.groupby(['strategy', 'selection_method', 'power_filtering', 'power_threshold', 'feature_rho'], dropna=False).agg({
         'ale': ['mean', 'std', 'min', 'max', 'count'],
         'pd': ['mean', 'std'],
         'precision': ['mean', 'std'],
@@ -1024,12 +1133,14 @@ def generate_analysis_report(
     # Top 10 strategies table
     report_lines.append("### Top 10 Strategies (by Mean ALE)")
     report_lines.append("")
-    report_lines.append("| Rank | Strategy | Selection | Feature Rho | Mean ALE (m) | Mean Pd (%) | N |")
-    report_lines.append("|------|----------|-----------|-------------|--------------|-------------|---|")
+    report_lines.append("| Rank | Strategy | Selection | Power Filter | Threshold | Feature Rho | Mean ALE (m) | Mean Pd (%) | N |")
+    report_lines.append("|------|----------|-----------|--------------|-----------|-------------|--------------|-------------|---|")
     for i, row in universal_summary.head(10).iterrows():
         rank = universal_summary.index.get_loc(i) + 1
+        pf_str = "Yes" if row['power_filtering'] else "No"
+        thresh_str = f"{row['power_threshold']}" if row['power_filtering'] else "-"
         report_lines.append(
-            f"| {rank} | {row['strategy']} | {row['selection_method']} | "
+            f"| {rank} | {row['strategy']} | {row['selection_method']} | {pf_str} | {thresh_str} | "
             f"{row['feature_rho']} | {row['ale_mean']:.2f} | "
             f"{row['pd_mean']*100:.1f} | {int(row['ale_count'])} |"
         )
@@ -1039,12 +1150,27 @@ def generate_analysis_report(
     report_lines.append("### Selection Method Comparison")
     report_lines.append("")
     
-    for method in ['max', 'cluster']:
-        method_df = results_df[results_df['selection_method'] == method]
+    # Selection configurations: (method, use_power_filtering)
+    selection_configs = [
+        ('max', False),
+        ('cluster', False),
+        ('max', True),
+        ('cluster', True),
+    ]
+    
+    for method, use_pf in selection_configs:
+        pf_suffix = " + PF" if use_pf else ""
+        method_name = f"{method}{pf_suffix}"
+        
+        method_df = results_df[
+            (results_df['selection_method'] == method) & 
+            (results_df['power_filtering'] == use_pf)
+        ]
+        
         if len(method_df) > 0:
             avg_ale = method_df['ale'].mean()
             avg_pd = method_df['pd'].mean()
-            report_lines.append(f"- **{method}**: Mean ALE = {avg_ale:.2f} m, Mean Pd = {avg_pd*100:.1f}%")
+            report_lines.append(f"- **{method_name}**: Mean ALE = {avg_ale:.2f} m, Mean Pd = {avg_pd*100:.1f}%")
     report_lines.append("")
     
     # Feature Rho Comparison
@@ -1185,12 +1311,19 @@ def generate_plots(
     
     # Plot 1b: Selection method comparison
     ax = axes[0, 1]
-    method_comparison = results_df.groupby('selection_method')['ale'].agg(['mean', 'std']).reset_index()
-    bars = ax.bar(method_comparison['selection_method'], method_comparison['mean'], 
-                  yerr=method_comparison['std'], color=['#2ecc71', '#e74c3c'], capsize=5)
-    ax.set_xlabel('Selection Method')
+    # Create label combining method and power filtering
+    results_df['method_label'] = results_df.apply(
+        lambda r: f"{r['selection_method']}{' + PF' if r['power_filtering'] else ''}", axis=1
+    )
+    method_comparison = results_df.groupby('method_label')['ale'].agg(['mean', 'std']).reset_index()
+    # Colors: Light/Dark Green for Cluster, Light/Dark Red for Max
+    method_colors = ['#2ecc71', '#27ae60', '#e74c3c', '#c0392b'][:len(method_comparison)]
+    bars = ax.bar(method_comparison['method_label'], method_comparison['mean'], 
+                  yerr=method_comparison['std'], color=method_colors, capsize=5)
+    ax.set_xlabel('Selection Configuration')
     ax.set_ylabel('Mean ALE (m)')
     ax.set_title('Selection Method Comparison')
+    plt.setp(ax.get_xticklabels(), rotation=15, ha='right')
     
     # Plot 1c: Feature rho comparison
     ax = axes[1, 0]
@@ -1249,6 +1382,29 @@ def generate_plots(
     plt.savefig(output_dir / 'heatmap.png', dpi=150)
     plt.close()
     
+    # Plot 3: Power Threshold Sensitivity
+    if 'power_threshold' in results_df.columns:
+        pf_results = results_df[results_df['power_filtering'] == True].copy()
+        if len(pf_results) > 0:
+            fig, ax = plt.subplots(figsize=(10, 6))
+            # Group by threshold and selection method
+            sensitivity = pf_results.groupby(['power_threshold', 'selection_method'])['ale'].mean().reset_index()
+            
+            for method in sensitivity['selection_method'].unique():
+                 subset = sensitivity[sensitivity['selection_method'] == method]
+                 subset = subset.sort_values('power_threshold')
+                 ax.plot(subset['power_threshold'], subset['ale'], marker='o', label=f"{method} + PF")
+            
+            ax.set_xlabel('Power Density Threshold')
+            ax.set_ylabel('Mean ALE (m)')
+            ax.set_title('Sensitivity to Power Density Threshold (Mean across all strategies)')
+            ax.grid(True, linestyle='--', alpha=0.7)
+            ax.legend()
+            
+            plt.tight_layout()
+            plt.savefig(output_dir / 'threshold_sensitivity.png', dpi=150)
+            plt.close()
+    
     print(f"✓ Plots saved to {output_dir}")
 
 
@@ -1289,8 +1445,18 @@ def main():
         '--workers', type=int, default=1,
         help='Number of parallel workers (default: 1 for sequential, -1 for all CPUs minus 1)'
     )
+    parser.add_argument(
+        '--power-thresholds', type=str, default=None,
+        help='Comma-separated list of power density thresholds to sweep (e.g., "0.01,0.1,0.3")'
+    )
     
     args = parser.parse_args()
+    
+    # Parse thresholds list
+    if args.power_thresholds:
+        power_thresholds = [float(x) for x in args.power_thresholds.split(',')]
+    else:
+        power_thresholds = POWER_DENSITY_THRESHOLDS
     
     # Parse TX counts filter
     tx_counts_filter = None
@@ -1359,6 +1525,7 @@ def main():
         save_visualizations=not args.no_visualizations,
         verbose=True,
         n_workers=args.workers,
+        power_thresholds=power_thresholds,
     )
     
     if len(results_df) == 0:

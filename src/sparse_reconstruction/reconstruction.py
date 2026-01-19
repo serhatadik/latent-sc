@@ -34,7 +34,7 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
                                  selection_method='max', cluster_distance_m=100.0, cluster_threshold_fraction=0.1,
                                  cluster_max_candidates=100,
                                  dedupe_distance_m=25.0,
-                                 power_density_sigma_m=200.0, power_density_threshold=0.3,
+                                 use_power_filtering=False, power_density_sigma_m=200.0, power_density_threshold=0.3,
                                  verbose=True,
                                  input_is_linear=False, solve_in_linear_domain=None,
                                  **solver_kwargs):
@@ -113,19 +113,17 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
         regardless of the selected propagation model.
     n_jobs : int, optional
         Number of parallel jobs for TIREM computation, default: -1
-    selection_method : {'max', 'cluster', 'power_cluster'}, optional
+    selection_method : {'max', 'cluster'}, optional
         Method for selecting the best candidate in GLRT solver. Default: 'max'
         - 'max': Select the single location with maximum GLRT score
         - 'cluster': Identify clusters of high-scoring locations and select 
           the centroid of the strongest cluster (by sum of scores)
-        - 'power_cluster': First filter candidates to high power-density regions,
-          then apply cluster selection. Uses residual power to adapt across iterations.
     cluster_distance_m : float, optional
         Maximum distance in meters to consider two candidates as part of the same cluster.
-        Default: 100.0 meters. Only used when selection_method='cluster' or 'power_cluster'.
+        Default: 100.0 meters.
     cluster_threshold_fraction : float, optional
         Fraction of max score for candidate inclusion in clustering (e.g., 0.1 = 10%).
-        Default: 0.1. Only used when selection_method='cluster' or 'power_cluster'.
+        Default: 0.1.
     cluster_max_candidates : int, optional
         Maximum number of top-scoring candidates to consider for clustering and to 
         store in history for visualization. Default: 100. This controls both the 
@@ -135,13 +133,17 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
         Transmitters within this distance of each other are merged, keeping the one
         added earliest. Default: 25.0. Set to 0 or None to disable deduplication.
         Only used when solver='glrt'.
+    use_power_filtering : bool, optional
+        If True, apply power density filtering before selection. Candidates in low
+        power-density regions are excluded. Can be combined with any selection_method.
+        Default: False. Only used when solver='glrt'.
     power_density_sigma_m : float, optional
         Characteristic distance scale in meters for power density Gaussian kernel.
-        Default: 200.0. Only used when selection_method='power_cluster'.
+        Default: 200.0. Only used when use_power_filtering=True.
     power_density_threshold : float, optional
         Fraction of max density below which candidates are excluded. Default: 0.3.
         E.g., 0.3 means only candidates in regions with density >= 30% of max density 
-        are considered. Only used when selection_method='power_cluster'.
+        are considered. Only used when use_power_filtering=True.
     verbose : bool, optional
         Print progress information, default: True
     input_is_linear : bool, optional
@@ -357,6 +359,7 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
             cluster_max_candidates=cluster_max_candidates,
             dedupe_distance_m=dedupe_distance_m,
             sensor_locations=sensor_locations,
+            use_power_filtering=use_power_filtering,
             power_density_sigma_m=power_density_sigma_m,
             power_density_threshold=power_density_threshold,
             verbose=verbose,
