@@ -1,4 +1,4 @@
-# Latent Spatial Coupling for Signal Power Estimation
+# Latent Spectrum Reconstruction for Signal Power Estimation
 
 This repository contains code for estimating signal power across a geographic region using measurements from monitoring stations. It implements likelihood-based localization and spatial interpolation techniques, plus a general-purpose pipeline for processing raw IQ samples from Software Defined Radios (SDRs).
 
@@ -104,7 +104,7 @@ jupyter notebook notebooks/custom_data_localization.ipynb
 
 ---
 
-## 🚀 Custom Data Pipeline
+## Custom Data Pipeline
 
 ### Supported Transmitters
 
