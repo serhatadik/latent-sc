@@ -245,6 +245,8 @@ def solve_iterative_glrt(A_model, W, observed_powers,
                          cluster_max_candidates=100, dedupe_distance_m=25.0,
                          sensor_locations=None, use_power_filtering=False,
                          power_density_sigma_m=200.0, power_density_threshold=0.3,
+                         max_tx_power_dbm=40.0, veto_margin_db=5.0, 
+                         veto_threshold=1e-9, ceiling_penalty_weight=0.1,
                          verbose=True, **solver_kwargs):
     """
     Solve for transmit power using Sequential "Add-One" Detection (GLRT).
@@ -297,6 +299,19 @@ def solve_iterative_glrt(A_model, W, observed_powers,
         Fraction of max density below which candidates are excluded. Default: 0.3.
         E.g., 0.3 means only candidates in regions with density >= 30% of max density 
         are considered. Only used when use_power_filtering=True.
+    max_tx_power_dbm : float, optional
+        Maximum plausible transmit power in dBm. Candidates exceeding this will be penalized.
+        Default: 40.0 dBm (10 Watts).
+    veto_margin_db : float, optional
+        Margin in dB for the silent sensor veto check.
+        A candidate is rejected if it predicts power > observation + margin at any sensor.
+        Default: 5.0 dB.
+    veto_threshold : float, optional
+        Accumulated linear power contradiction threshold for rejection.
+        Default: 1e-9 (approx -60dBm accum over sensors).
+    ceiling_penalty_weight : float, optional
+        Weight for the soft power ceiling penalty. Higher values penalize "ghost" 
+        candidates more aggressively. Default: 0.1.
     verbose : bool, optional
         Print progress. Default: True
     **solver_kwargs
@@ -571,7 +586,108 @@ def solve_iterative_glrt(A_model, W, observed_powers,
             
             # GLRT Scores
             scores = numerator / A_w_norms_sq
+            
+            # Denominator for x_hat calculation
+            denom_storage = A_w_norms_sq
+
+        # --- PHYSICS-AWARE SCORING ---
         
+        # 1. Explicit Amplitude Estimation (x_hat)
+        # x_hat = (Numerator Term) / (Denominator Term) = correlations / denom
+        # Note: 'correlations' is (a^T V^-1 r) or (a_w^T r_w)
+        # 'denom_storage' is (a^T V^-1 a) or ||a_w||^2
+        
+        # Avoid division by zero
+        denom_safe = denom_storage.copy()
+        denom_safe[denom_safe < 1e-20] = 1e-20
+        x_hat = correlations / denom_safe
+        
+        # Initialize physics modifiers
+        physics_mask = np.ones_like(scores, dtype=bool)
+        penalty_factors = np.ones_like(scores)
+        
+        # CHECK A: Non-Negativity (Hard Constraint)
+        # Candidates requiring negative power to explain residual are impossible
+        negative_power_mask = x_hat < 0
+        physics_mask[negative_power_mask] = False
+        
+        # CHECK B: Silent Sensor Veto (Contradiction Check)
+        if veto_threshold is not None:
+             # Logic: If candidate i is real with power x_hat[i], then sensor k
+             # MUST see at least A_ki * x_hat[i].
+             # If A_ki * x_hat[i] >> observed_powers[k], that's a contradiction.
+             
+             # We check meaningful candidates only (positive power) to save compute
+             candidates_to_check = np.where(physics_mask)[0]
+             
+             if len(candidates_to_check) > 0:
+                 # Setup thresholds
+                 margin_linear = 10**(veto_margin_db / 10.0)
+                 
+                 # Vectorized check:
+                 # Predicted Power Matrix: (M, K) = A_model[:, candidates] * x_hat[candidates]
+                 # This can be large if components are large. M is small. K is up to N.
+                 # Memory efficient: Loop or block-matrix?
+                 # M ~ 10, N ~ 10k. 10 * 10k * 8 bytes = 800KB. It's tiny. Safe to verify.
+                 
+                 A_subset = A_model[:, candidates_to_check]     # (M, K)
+                 x_subset = x_hat[candidates_to_check]          # (K,)
+                 
+                 # Broadcast multiply: A_ki * x_i
+                 pred_powers = A_subset * x_subset[np.newaxis, :] # (M, K)
+                 
+                 # Compare to ORIGINAL observed powers (plus margin)
+                 # observed_powers is (M,)
+                 obs_thresholds = observed_powers[:, np.newaxis] * margin_linear
+                 
+                 # Diff: Pred - Threshold
+                 diffs = pred_powers - obs_thresholds # (M, K)
+                 
+                 # Only count where Predict > Observe (positive diff)
+                 # ReLU
+                 diffs[diffs < 0] = 0.0
+                 
+                 # Sum contradiction cost across sensors for each candidate
+                 contradiction_costs = np.sum(diffs, axis=0) # (K,)
+                 
+                 # Identify vetoed candidates
+                 vetoed_indices_local = np.where(contradiction_costs > veto_threshold)[0]
+                 vetoed_candidates = candidates_to_check[vetoed_indices_local]
+                 
+                 # Apply veto
+                 physics_mask[vetoed_candidates] = False
+                 
+        # CHECK C: Power Plausibility Penalty (Soft Ceiling)
+        # Penalize candidates implying unrealistically high transmit power
+        # x_hat is is linear (mW if inputs were mW).
+        # We need to convert to dBm for threshold comparison.
+        
+        # Candidates passing hard constraints
+        valid_indices = np.where(physics_mask)[0]
+        if len(valid_indices) > 0:
+             x_valid = x_hat[valid_indices]
+             # Avoid log(0) - though mask should handle <= 0
+             x_valid_safe = np.maximum(x_valid, 1e-20)
+             x_valid_dbm = 10 * np.log10(x_valid_safe)
+             
+             # Calculate excess power
+             excess = x_valid_dbm - max_tx_power_dbm
+             excess[excess < 0] = 0.0
+             
+             # Penalty: 1 / (1 + weight * excess^2)
+             # If excess=0 -> factor=1. If excess=10dB -> 1/(1 + 0.1*100) = 1/11 ~ 0.09
+             penalties = 1.0 / (1.0 + ceiling_penalty_weight * (excess**2))
+             
+             penalty_factors[valid_indices] = penalties
+
+        # Apply Physics constraints to scores
+        # 1. Zero out invalid candidates
+        scores[~physics_mask] = 0.0
+        
+        # 2. Apply soft penalties
+        scores *= penalty_factors
+        
+        # -----------------------------        
         # Mask out already selected indices
         scores[support] = -1.0
         

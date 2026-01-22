@@ -35,6 +35,8 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
                                  cluster_max_candidates=100,
                                  dedupe_distance_m=25.0,
                                  use_power_filtering=False, power_density_sigma_m=200.0, power_density_threshold=0.3,
+                                 max_tx_power_dbm=40.0, veto_margin_db=5.0, 
+                                 veto_threshold=1e-9, ceiling_penalty_weight=0.1,
                                  verbose=True,
                                  input_is_linear=False, solve_in_linear_domain=None,
                                  **solver_kwargs):
@@ -144,6 +146,15 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
         Fraction of max density below which candidates are excluded. Default: 0.3.
         E.g., 0.3 means only candidates in regions with density >= 30% of max density 
         are considered. Only used when use_power_filtering=True.
+    max_tx_power_dbm : float, optional
+        Maximum plausible transmit power in dBm. Candidates exceeding this will be penalized.
+        Default: 40.0 dBm.
+    veto_margin_db : float, optional
+        Margin in dB for the silent sensor veto check. Default: 5.0 dB.
+    veto_threshold : float, optional
+        Accumulated linear power contradiction threshold for rejection. Default: 1e-9.
+    ceiling_penalty_weight : float, optional
+        Weight for the soft power ceiling penalty. Default: 0.1.
     verbose : bool, optional
         Print progress information, default: True
     input_is_linear : bool, optional
@@ -362,6 +373,10 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
             use_power_filtering=use_power_filtering,
             power_density_sigma_m=power_density_sigma_m,
             power_density_threshold=power_density_threshold,
+            max_tx_power_dbm=max_tx_power_dbm,
+            veto_margin_db=veto_margin_db,
+            veto_threshold=veto_threshold,
+            ceiling_penalty_weight=ceiling_penalty_weight,
             verbose=verbose,
             lambda_reg=lambda_reg,
             norm_exponent=norm_exponent,
