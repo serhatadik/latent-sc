@@ -624,7 +624,7 @@ def run_single_experiment(
             use_power_filtering=use_power_filtering,
             power_density_threshold=power_density_threshold,
             cluster_max_candidates=30,
-            glrt_max_iter=len(transmitters) + 1,
+            glrt_max_iter=max(10, len(transmitters) + 5),
             glrt_threshold=4.0,
             dedupe_distance_m=25.0,
             return_linear_scale=False,
@@ -686,6 +686,36 @@ def run_single_experiment(
             tolerance=200.0
         )
         
+        # Extract GLRT score history from solver info
+        glrt_score_history = []
+        glrt_n_iterations = 0
+        glrt_initial_score = 0.0
+        glrt_final_score = 0.0
+        glrt_score_reduction = 0.0
+        
+        if 'solver_info' in info and 'candidates_history' in info['solver_info']:
+            candidates_history = info['solver_info']['candidates_history']
+            whitening_method = info['solver_info'].get('whitening_method', 'unknown')
+            
+            if len(candidates_history) > 0:
+                glrt_n_iterations = len(candidates_history)
+                
+                # Extract scores - use normalized_score which is geo_aware_score for hetero_geo_aware
+                # and R^2 normalized score for other methods
+                for item in candidates_history:
+                    # normalized_score contains the appropriate score based on whitening method
+                    score = item.get('normalized_score', item.get('selected_score', 0.0))
+                    glrt_score_history.append(float(score))
+                
+                if glrt_score_history:
+                    glrt_initial_score = glrt_score_history[0]
+                    glrt_final_score = glrt_score_history[-1]
+                    glrt_score_reduction = glrt_initial_score - glrt_final_score
+        
+        # Convert history to JSON string for CSV storage
+        import json
+        glrt_score_history_str = json.dumps([round(s, 6) for s in glrt_score_history])
+        
         return {
             'ale': metrics['ale'],
             'tp': metrics['tp'],
@@ -702,6 +732,11 @@ def run_single_experiment(
             'obs_min_dbm': np.min(observed_powers_dB),
             'obs_mean_dbm': np.mean(observed_powers_dB),
             'obs_max_dbm': np.max(observed_powers_dB),
+            'glrt_n_iterations': glrt_n_iterations,
+            'glrt_initial_score': glrt_initial_score,
+            'glrt_final_score': glrt_final_score,
+            'glrt_score_reduction': glrt_score_reduction,
+            'glrt_score_history': glrt_score_history_str,
         }
         
     except Exception as e:
@@ -910,6 +945,29 @@ def process_single_directory(args: Tuple) -> Tuple[List[Dict], str]:
     return results, None  # None = no skip reason, processing succeeded
 
 
+def append_results_to_csv(results: List[Dict], output_dir: Path):
+    """
+    Append a batch of results to the main results CSV file.
+    Handles header creation if file doesn't exist.
+    """
+    if not results:
+        return
+        
+    csv_path = output_dir / 'all_results.csv'
+    df = pd.DataFrame(results)
+    
+    # Check if file exists to determine if header is needed
+    file_exists = csv_path.exists()
+    
+    # Use append mode 'a'
+    # Locking is not implemented here, assuming main thread calls this sequentially
+    try:
+        df.to_csv(csv_path, mode='a', header=not file_exists, index=False)
+    except Exception as e:
+        print(f"Warning: Failed to append results to CSV: {e}")
+
+
+
 def run_comprehensive_sweep(
     grouped_dirs: Dict[int, List[Dict]],
     config: Dict,
@@ -1023,12 +1081,14 @@ def run_comprehensive_sweep(
             print(f"  [{i+1}/{total_dirs}] Processing {dir_name}...", end=" ", flush=True)
             
             dir_results, skip_reason = process_single_directory(args)
-            results.extend(dir_results)
             
             if skip_reason:
                 print(f"SKIPPED ({skip_reason})")
             else:
                 print(f"{len(dir_results)} experiments")
+                # Incremental save
+                results.extend(dir_results)
+                append_results_to_csv(dir_results, output_dir)
             
             # Progress estimate
             elapsed = time.time() - start_time
@@ -1039,25 +1099,33 @@ def run_comprehensive_sweep(
                       f"Elapsed: {elapsed/60:.1f}min | "
                       f"Remaining: ~{remaining/60:.1f}min")
     else:
-        # Parallel execution using joblib
-        # joblib properly handles numpy threading issues on Windows
+        # Parallel execution using concurrent.futures for incremental processing
         print(f"\nRunning in parallel mode with {n_workers} workers...")
         
-        # Run in parallel with joblib (verbose=0 for cleaner output)
-        parallel_results = Parallel(n_jobs=n_workers, backend='loky', verbose=0)(
-            delayed(process_single_directory)(args) for args in task_args
-        )
-        
-        # Process results and count successes/skipped
-        n_skipped = 0
-        n_success = 0
-        for dir_results, skip_reason in parallel_results:
-            if skip_reason:
-                n_skipped += 1
-            else:
-                n_success += 1
-                results.extend(dir_results)
-        
+        with ProcessPoolExecutor(max_workers=n_workers) as executor:
+            # Submit all tasks
+            future_to_args = {executor.submit(process_single_directory, args): args for args in task_args}
+            
+            n_skipped = 0
+            n_success = 0
+            
+            # Process as they complete
+            for i, future in enumerate(as_completed(future_to_args)):
+                try:
+                    dir_results, skip_reason = future.result()
+                    
+                    if skip_reason:
+                        n_skipped += 1
+                    else:
+                        n_success += 1
+                        results.extend(dir_results)
+                        # Incremental save
+                        append_results_to_csv(dir_results, output_dir)
+                        
+                except Exception as exc:
+                    print(f"Generated an exception: {exc}")
+                    n_skipped += 1
+
         print(f"  Directories processed: {n_success} success, {n_skipped} skipped")
     
     elapsed_total = time.time() - start_time
@@ -1095,6 +1163,9 @@ def analyze_by_tx_count(results_df: pd.DataFrame) -> Dict[int, pd.DataFrame]:
             'fp': 'sum',
             'fn': 'sum',
             'runtime_s': 'mean',
+            'glrt_final_score': ['mean', 'std', 'min', 'max'],
+            'glrt_n_iterations': ['mean', 'std'],
+            'glrt_score_reduction': ['mean', 'std'],
         }).reset_index()
         
         # Flatten column names
@@ -1134,6 +1205,9 @@ def analyze_universal(results_df: pd.DataFrame) -> pd.DataFrame:
         'fp': 'sum',
         'fn': 'sum',
         'runtime_s': 'mean',
+        'glrt_final_score': ['mean', 'std', 'min', 'max'],
+        'glrt_n_iterations': ['mean', 'std'],
+        'glrt_score_reduction': ['mean', 'std'],
     }).reset_index()
     
     # Flatten column names
@@ -1176,6 +1250,152 @@ def analyze_by_tx_set(results_df: pd.DataFrame) -> pd.DataFrame:
     
     return summary
 
+
+def analyze_glrt_score_correlation(results_df: pd.DataFrame) -> Dict:
+    """
+    Analyze correlation between GLRT scores and localization performance.
+    
+    Determines if GLRT scores can predict which configuration will perform best.
+    
+    Returns
+    -------
+    dict
+        Correlation analysis results including:
+        - Overall correlations (Pearson/Spearman)
+        - Per-directory comparison of best ALE config vs. lowest GLRT score config
+        - Summary statistics
+    """
+    from scipy import stats
+    
+    analysis = {
+        'overall_correlations': {},
+        'per_directory_analysis': [],
+        'matching_rate': 0.0,
+        'summary': '',
+    }
+    
+    # Check if GLRT score columns exist
+    if 'glrt_final_score' not in results_df.columns:
+        analysis['summary'] = 'GLRT score columns not found in results.'
+        return analysis
+    
+    # Filter out rows with missing/invalid GLRT scores
+    valid_df = results_df[
+        (results_df['glrt_final_score'].notna()) & 
+        (results_df['glrt_final_score'] > 0)
+    ].copy()
+    
+    if len(valid_df) < 10:
+        analysis['summary'] = f'Insufficient data for correlation analysis ({len(valid_df)} valid experiments).'
+        return analysis
+    
+    # Overall correlations
+    try:
+        # Pearson correlation between final GLRT score and ALE
+        pearson_r, pearson_p = stats.pearsonr(valid_df['glrt_final_score'], valid_df['ale'])
+        analysis['overall_correlations']['final_score_vs_ale_pearson'] = {
+            'r': float(pearson_r),
+            'p_value': float(pearson_p),
+        }
+        
+        # Spearman correlation (rank-based, more robust to outliers)
+        spearman_r, spearman_p = stats.spearmanr(valid_df['glrt_final_score'], valid_df['ale'])
+        analysis['overall_correlations']['final_score_vs_ale_spearman'] = {
+            'r': float(spearman_r),
+            'p_value': float(spearman_p),
+        }
+        
+        # Correlation between score reduction and ALE
+        if valid_df['glrt_score_reduction'].notna().any():
+            reduction_data = valid_df[valid_df['glrt_score_reduction'].notna()]
+            if len(reduction_data) > 10:
+                sr_pearson_r, sr_pearson_p = stats.pearsonr(reduction_data['glrt_score_reduction'], reduction_data['ale'])
+                analysis['overall_correlations']['score_reduction_vs_ale'] = {
+                    'r': float(sr_pearson_r),
+                    'p_value': float(sr_pearson_p),
+                }
+        
+        # Correlation between n_iterations and ALE
+        if valid_df['glrt_n_iterations'].notna().any():
+            iter_data = valid_df[valid_df['glrt_n_iterations'].notna()]
+            if len(iter_data) > 10:
+                iter_pearson_r, iter_pearson_p = stats.pearsonr(iter_data['glrt_n_iterations'], iter_data['ale'])
+                analysis['overall_correlations']['n_iterations_vs_ale'] = {
+                    'r': float(iter_pearson_r),
+                    'p_value': float(iter_pearson_p),
+                }
+                
+    except Exception as e:
+        analysis['overall_correlations']['error'] = str(e)
+    
+    # Per-directory analysis: does lowest GLRT score predict best ALE?
+    matches = 0
+    total_dirs = 0
+    
+    for dir_name in valid_df['dir_name'].unique():
+        dir_df = valid_df[valid_df['dir_name'] == dir_name]
+        
+        if len(dir_df) < 2:
+            continue
+        
+        total_dirs += 1
+        
+        # Find config with lowest ALE
+        best_ale_idx = dir_df['ale'].idxmin()
+        best_ale_config = dir_df.loc[best_ale_idx]
+        
+        # Find config with lowest final GLRT score
+        lowest_glrt_idx = dir_df['glrt_final_score'].idxmin()
+        lowest_glrt_config = dir_df.loc[lowest_glrt_idx]
+        
+        # Check if they match (same strategy, selection method, etc.)
+        config_match = (
+            best_ale_config['strategy'] == lowest_glrt_config['strategy'] and
+            best_ale_config['selection_method'] == lowest_glrt_config['selection_method'] and
+            best_ale_config['power_filtering'] == lowest_glrt_config['power_filtering']
+        )
+        
+        if config_match:
+            matches += 1
+        
+        analysis['per_directory_analysis'].append({
+            'dir_name': dir_name,
+            'best_ale': float(best_ale_config['ale']),
+            'best_ale_config': f"{best_ale_config['strategy']}_{best_ale_config['selection_method']}",
+            'best_ale_glrt_score': float(best_ale_config['glrt_final_score']),
+            'lowest_glrt_score': float(lowest_glrt_config['glrt_final_score']),
+            'lowest_glrt_config': f"{lowest_glrt_config['strategy']}_{lowest_glrt_config['selection_method']}",
+            'lowest_glrt_ale': float(lowest_glrt_config['ale']),
+            'configs_match': config_match,
+        })
+    
+    # Compute matching rate
+    if total_dirs > 0:
+        analysis['matching_rate'] = matches / total_dirs
+    
+    # Generate summary
+    pearson_r = analysis['overall_correlations'].get('final_score_vs_ale_pearson', {}).get('r', None)
+    spearman_r = analysis['overall_correlations'].get('final_score_vs_ale_spearman', {}).get('r', None)
+    
+    if pearson_r is not None:
+        correlation_strength = 'weak'
+        if abs(pearson_r) > 0.5:
+            correlation_strength = 'moderate'
+        if abs(pearson_r) > 0.7:
+            correlation_strength = 'strong'
+        
+        direction = 'positive' if pearson_r > 0 else 'negative'
+        
+        analysis['summary'] = (
+            f"GLRT final score shows {correlation_strength} {direction} correlation with ALE "
+            f"(Pearson r={pearson_r:.3f}, Spearman r={spearman_r:.3f}). "
+            f"The config with lowest GLRT score matched the best ALE config in "
+            f"{analysis['matching_rate']*100:.1f}% of directories ({matches}/{total_dirs})."
+        )
+    else:
+        analysis['summary'] = f"Could not compute correlations. Matching rate: {analysis['matching_rate']*100:.1f}%"
+    
+    return analysis
 
 def generate_analysis_report(
     results_df: pd.DataFrame,
@@ -1374,6 +1594,60 @@ def generate_analysis_report(
                         f"{row['ale_mean']:.2f} | {row['pd_mean']*100:.1f}% | {prec_str} | {err_str} |"
                     )
                 report_lines.append("")
+
+    # GLRT Score Analysis
+    report_lines.append("## GLRT Score Analysis")
+    report_lines.append("")
+    
+    glrt_analysis = analyze_glrt_score_correlation(results_df)
+    report_lines.append(f"**Summary**: {glrt_analysis['summary']}")
+    report_lines.append("")
+    
+    if glrt_analysis['overall_correlations']:
+        report_lines.append("### Correlations (Overall)")
+        report_lines.append("| Metric Pair | Type | Correlation (r) | p-value |")
+        report_lines.append("|-------------|------|----------------|---------|")
+        
+        corrs = glrt_analysis['overall_correlations']
+        if 'final_score_vs_ale_pearson' in corrs:
+            c = corrs['final_score_vs_ale_pearson']
+            report_lines.append(f"| Final Score vs ALE | Pearson | {c['r']:.3f} | {c['p_value']:.4e} |")
+        if 'final_score_vs_ale_spearman' in corrs:
+            c = corrs['final_score_vs_ale_spearman']
+            report_lines.append(f"| Final Score vs ALE | Spearman | {c['r']:.3f} | {c['p_value']:.4e} |")
+        if 'score_reduction_vs_ale' in corrs:
+            c = corrs['score_reduction_vs_ale']
+            report_lines.append(f"| Score Reduction vs ALE | Pearson | {c['r']:.3f} | {c['p_value']:.4e} |")
+        if 'n_iterations_vs_ale' in corrs:
+            c = corrs['n_iterations_vs_ale']
+            report_lines.append(f"| N Iterations vs ALE | Pearson | {c['r']:.3f} | {c['p_value']:.4e} |")
+        report_lines.append("")
+        
+        report_lines.append("> **Note**: Strong positive correlation means higher score -> higher ALE (bad). Strong negative means higher score -> lower ALE (good). Ideally we want the score to be a good quality indicator (negative correlation).")
+        report_lines.append("")
+    
+    if len(glrt_analysis['per_directory_analysis']) > 0:
+        report_lines.append("### Best ALE vs Lowest GLRT Score (Per Directory)")
+        report_lines.append("")
+        report_lines.append(f"**Matching Rate**: {glrt_analysis['matching_rate']*100:.1f}% of directories had their best ALE result from the configuration that produced the lowest GLRT score.")
+        report_lines.append("")
+        
+        # Show top 5 mismatches (largest ALE difference)
+        mismatches = [item for item in glrt_analysis['per_directory_analysis'] if not item['configs_match']]
+        mismatches.sort(key=lambda x: x['lowest_glrt_ale'] - x['best_ale'], reverse=True)
+        
+        if mismatches:
+            report_lines.append("#### Top Mismatches (Where lowest GLRT score misled the most)")
+            report_lines.append("| Directory | Best ALE Config | Best ALE (m) | Lowest GLRT Config | Lowest GLRT ALE (m) | Diff (m) |")
+            report_lines.append("|-----------|-----------------|--------------|--------------------|---------------------|----------|")
+            
+            for item in mismatches[:5]:
+                diff = item['lowest_glrt_ale'] - item['best_ale']
+                report_lines.append(
+                    f"| {item['dir_name']} | {item['best_ale_config']} | {item['best_ale']:.2f} | "
+                    f"{item['lowest_glrt_config']} | {item['lowest_glrt_ale']:.2f} | +{diff:.2f} |"
+                )
+            report_lines.append("")
 
     # Conclusions
     report_lines.append("## Summary and Recommendations")
@@ -1669,6 +1943,12 @@ def main():
     if len(results_df) == 0:
         print("\nNo results collected. Exiting.")
         return
+    
+    # Sort results for consistent grouping
+    results_df = results_df.sort_values(
+        by=['dir_name', 'transmitters', 'random_seed', 'strategy', 'selection_method', 'power_filtering'],
+        na_position='last'
+    )
     
     # Save raw results
     results_path = output_dir / 'all_results.csv'
