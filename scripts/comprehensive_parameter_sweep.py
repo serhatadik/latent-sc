@@ -71,8 +71,8 @@ from src.evaluation.metrics import compute_localization_metrics
 KNOWN_TRANSMITTERS = ['guesthouse', 'mario', 'moran', 'ustar', 'wasatch']
 
 # Feature rho configurations to sweep
+# Feature rho configurations to sweep
 FEATURE_RHO_CONFIGS = {
-    'los_normalized': [0.2, 1e10, 1e10, 1e10],  # LOS normalized
     'no_normalization': [1e10, 1e10, 1e10, 1e10],  # No normalization
 }
 
@@ -300,16 +300,11 @@ def define_sigma_noise_strategies(observed_powers_linear: np.ndarray, test_mode:
     # - 20x_min: 9.9% success rate, 9.4% times best
     # - 0.1_mean: 11.5% success rate (highest), achieved best overall ALE (30.4m)
     strategies = {
-        # Fixed values (best performers)
-        'fixed_1e-9': 1e-9,
-        'fixed_5e-9': 5e-9,
-        
         # Min-power based (dynamic, scaled to data)
         '10x_min': 10.0 * min_power,
         '20x_min': 20.0 * min_power,
         
         # Mean-power based (best success rate)
-        '0.01_mean': 0.01 * mean_power,
         '0.1_mean': 0.1 * mean_power,
     }
     
@@ -663,6 +658,8 @@ def run_single_experiment(
             support_indices = info['solver_info']['support']
             height, width = map_data['shape']
             
+            n_est_raw = len(support_indices)
+            
             valid_indices = []
             for idx in support_indices:
                 r, c = idx // width, idx % width
@@ -670,12 +667,16 @@ def run_single_experiment(
                 if power_dbm > -190:
                     valid_indices.append(idx)
             
+            n_est_diff = n_est_raw - len(valid_indices)
+            
             est_rows = [idx // width for idx in valid_indices]
             est_cols = [idx % width for idx in valid_indices]
             est_locs_pixels = np.column_stack((est_cols, est_rows)) if valid_indices else np.empty((0, 2))
         else:
             from src.evaluation.metrics import extract_locations_from_map
             est_locs_pixels = extract_locations_from_map(tx_map, threshold=1e-10)
+            n_est_raw = len(est_locs_pixels)
+            n_est_diff = 0
         
         # Compute metrics
         metrics = compute_localization_metrics(
@@ -694,6 +695,9 @@ def run_single_experiment(
             'precision': metrics['precision'],
             'f1_score': metrics['f1_score'],
             'n_estimated': metrics['n_est'],
+            'n_est_raw': n_est_raw,
+            'n_est_diff': n_est_diff,
+            'count_error': metrics['n_est'] - len(true_locs_pixels),
             'runtime_s': elapsed,
             'obs_min_dbm': np.min(observed_powers_dB),
             'obs_mean_dbm': np.mean(observed_powers_dB),
@@ -841,6 +845,20 @@ def process_single_directory(args: Tuple) -> Tuple[List[Dict], str]:
                         except Exception as inner_exc:
                             failed += 1
                         # Continue to next experiment
+                        
+                        # --- Intermediate Logging (every 5 experiments) ---
+                        if attempted % 5 == 0:
+                            n_curr = len(results)
+                            best_curr = min(r['ale'] for r in results) if results else float('inf')
+                            msg = f"[{dir_name}] Progress: {n_curr}/{attempted} exps | Best ALE: {best_curr:.2f}m"
+                            print(f"  {msg}", flush=True)
+                            try:
+                                log_path = output_dir / "sweep_progress.log"
+                                with open(log_path, "a", encoding="utf-8") as f:
+                                    timestamp = datetime.now().strftime("%H:%M:%S")
+                                    f.write(f"[{timestamp}] {msg}\n")
+                            except:
+                                pass
     except Exception as e:
         import traceback
         return results, f"EXCEPTION after {attempted} attempts ({failed} failed): {e}\n{traceback.format_exc()}"
@@ -848,6 +866,47 @@ def process_single_directory(args: Tuple) -> Tuple[List[Dict], str]:
     if failed > 0 and len(results) == 0:
         return results, f"all {attempted} experiments failed"
     
+    # --- Logging Results ---
+    n_completed = len(results)
+    best_ale = float('inf')
+    max_prec = 0.0
+    max_pd = 0.0
+    best_count_err = 0.0
+    
+    if n_completed > 0:
+        best_ale = min(r['ale'] for r in results)
+        max_prec = max(r['precision'] for r in results)
+        max_pd = max(r['pd'] for r in results)
+        
+        # for count error, we want the one with min absolute value
+        errors = [r['count_error'] for r in results]
+        best_count_err = min(errors, key=abs)
+    
+    # Format message
+    # [Dir Name] Comp: X | Best ALE: Y.YYm | Max Pd: P.PP | Max Prec: Z.ZZ | Best C.Err: W.WW
+    msg = (f"[{dir_name}] Comp: {n_completed}/{attempted} | "
+           f"Best ALE: {best_ale:.1f}m | "
+           f"Max Pd: {max_pd:.2f} | "
+           f"Max Prec: {max_prec:.2f} | "
+           f"Best C.Err: {best_count_err:.1f}")
+           
+    if failed > 0:
+        msg += f" | Failed: {failed}"
+        
+    # 1. Print to stdout (will be captured by joblib and shown in main process)
+    print(f"  {msg}", flush=True)
+    
+    # 2. Append to log file
+    try:
+        log_path = output_dir / "sweep_progress.log"
+        # Use append mode, and simple locking by OS (hope for the best with concurrency)
+        # For true safety we'd need a lock, but for simple logging this is usually fine
+        with open(log_path, "a", encoding="utf-8") as f:
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            f.write(f"[{timestamp}] {msg}\n")
+    except Exception:
+        pass # Don't fail the worker just because logging failed
+        
     return results, None  # None = no skip reason, processing succeeded
 
 
@@ -894,7 +953,7 @@ def run_comprehensive_sweep(
     feature_rho_configs = FEATURE_RHO_CONFIGS
     if test_mode:
         # Only use one config in test mode
-        feature_rho_configs = {'los_normalized': [0.2, 1e10, 1e10, 1e10]}
+        feature_rho_configs = {'no_normalization': [1e10, 1e10, 1e10, 1e10]}
     
     # Filter TX counts if specified
     if tx_counts_filter:
@@ -1028,6 +1087,10 @@ def analyze_by_tx_count(results_df: pd.DataFrame) -> Dict[int, pd.DataFrame]:
             'pd': ['mean', 'std'],
             'precision': ['mean', 'std'],
             'f1_score': ['mean', 'std'],
+            'n_estimated': ['mean', 'std'],
+            'n_est_raw': ['mean'],
+            'n_est_diff': ['mean'],
+            'count_error': ['mean', 'std', 'min', 'max'],
             'tp': 'sum',
             'fp': 'sum',
             'fn': 'sum',
@@ -1063,6 +1126,10 @@ def analyze_universal(results_df: pd.DataFrame) -> pd.DataFrame:
         'pd': ['mean', 'std'],
         'precision': ['mean', 'std'],
         'f1_score': ['mean', 'std'],
+        'n_estimated': ['mean', 'std'],
+        'n_est_raw': ['mean'],
+        'n_est_diff': ['mean'],
+        'count_error': ['mean', 'std', 'min', 'max'],
         'tp': 'sum',
         'fp': 'sum',
         'fn': 'sum',
@@ -1081,11 +1148,41 @@ def analyze_universal(results_df: pd.DataFrame) -> pd.DataFrame:
     return grouped
 
 
+
+def analyze_by_tx_set(results_df: pd.DataFrame) -> pd.DataFrame:
+    """Analyze performance grouped by specific transmitter sets."""
+    # Group by key columns
+    group_cols = ['transmitters', 'strategy', 'selection_method', 'power_filtering', 'power_threshold', 'feature_rho']
+    
+    # Calculate aggregation
+    summary = results_df.groupby(group_cols).agg(
+        ale_mean=('ale', 'mean'),
+        ale_std=('ale', 'std'),
+        ale_min=('ale', 'min'),
+        ale_max=('ale', 'max'),
+        ale_count=('ale', 'count'),
+        pd_mean=('pd', 'mean'),
+        pd_std=('pd', 'std'),
+        precision_mean=('precision', 'mean'),
+        f1_mean=('f1_score', 'mean'),
+        n_est_mean=('n_estimated', 'mean'),
+        n_est_raw_mean=('n_est_raw', 'mean'),
+        n_est_diff_mean=('n_est_diff', 'mean'),
+        count_error_mean=('count_error', 'mean'),
+    ).reset_index()
+    
+    # Sort by transmitters and then by ALE
+    summary = summary.sort_values(['transmitters', 'ale_mean'])
+    
+    return summary
+
+
 def generate_analysis_report(
     results_df: pd.DataFrame,
     tx_count_summaries: Dict[int, pd.DataFrame],
     universal_summary: pd.DataFrame,
     output_dir: Path,
+    tx_set_summary: Optional[pd.DataFrame] = None,
 ) -> str:
     """
     Generate a comprehensive markdown analysis report.
@@ -1127,6 +1224,10 @@ def generate_analysis_report(
     report_lines.append(f"- **Mean ALE**: {best_row['ale_mean']:.2f} m (±{best_row['ale_std']:.2f})")
     report_lines.append(f"- **Mean Pd**: {best_row['pd_mean']*100:.1f}% (±{best_row['pd_std']*100:.1f})")
     report_lines.append(f"- **Mean Precision**: {best_row['precision_mean']*100:.1f}%")
+    if 'n_est_mean' in best_row:
+        report_lines.append(f"- **Mean N Est (Filtered)**: {best_row['n_est_mean']:.2f} (raw: {best_row.get('n_est_raw_mean', 0):.2f})")
+    if 'count_error_mean' in best_row:
+        report_lines.append(f"- **Mean Count Error**: {best_row['count_error_mean']:.2f}")
     report_lines.append(f"- **Experiments**: {int(best_row['ale_count'])}")
     report_lines.append("")
     
@@ -1225,6 +1326,10 @@ def generate_analysis_report(
             report_lines.append(f"- Mean ALE: {best['ale_mean']:.2f} m (±{best['ale_std']:.2f})")
             report_lines.append(f"- Mean Pd: {best['pd_mean']*100:.1f}%")
             report_lines.append(f"- Mean Precision: {best['precision_mean']*100:.1f}%")
+            if 'n_est_mean' in best:
+                report_lines.append(f"- Mean N (Est/Raw): {best['n_est_mean']:.1f} / {best.get('n_est_raw_mean', 0):.1f}")
+            if 'count_error_mean' in best:
+                report_lines.append(f"- Mean Count Error: {best['count_error_mean']:.2f}")
             report_lines.append("")
             
             # Top 5 for this TX count
@@ -1237,6 +1342,39 @@ def generate_analysis_report(
                 )
             report_lines.append("")
     
+    
+    # Per TX Set Analysis
+    if tx_set_summary is not None:
+        report_lines.append("## Analysis by Transmitter Set")
+        report_lines.append("")
+        
+        for tx_set in sorted(tx_set_summary['transmitters'].unique()):
+            set_summary = tx_set_summary[tx_set_summary['transmitters'] == tx_set]
+            
+            report_lines.append(f"### Transmitters: {tx_set}")
+            report_lines.append("")
+            
+            if len(set_summary) > 0:
+                best = set_summary.iloc[0]
+                report_lines.append(f"**Best Strategy**: `{best['strategy']}` with `{best['selection_method']}`")
+                report_lines.append(f"- Mean ALE: {best['ale_mean']:.2f} m")
+                report_lines.append(f"- Mean Pd: {best['pd_mean']*100:.1f}%")
+                if 'n_est_mean' in best:
+                     report_lines.append(f"- Mean N Est: {best['n_est_mean']:.1f}")
+                report_lines.append("")
+                
+                # Top 3 for this set
+                report_lines.append("| Strategy | Selection | Mean ALE | Mean Pd | Precision | Count Err |")
+                report_lines.append("|----------|-----------|----------|---------|-----------|-----------|")
+                for _, row in set_summary.head(3).iterrows():
+                    prec_str = f"{row['precision_mean']*100:.1f}%" if 'precision_mean' in row else "-"
+                    err_str = f"{row['count_error_mean']:.2f}" if 'count_error_mean' in row else "-"
+                    report_lines.append(
+                        f"| {row['strategy']} | {row['selection_method']} | "
+                        f"{row['ale_mean']:.2f} | {row['pd_mean']*100:.1f}% | {prec_str} | {err_str} |"
+                    )
+                report_lines.append("")
+
     # Conclusions
     report_lines.append("## Summary and Recommendations")
     report_lines.append("")
@@ -1555,6 +1693,21 @@ def main():
         output_dir=output_dir,
     )
     print(f"✓ Analysis report saved to: {report_path}")
+
+    # Generate per-tx set analysis
+    print("\nGenerating per-transmitter set analysis...")
+    tx_set_summary = analyze_by_tx_set(results_df)
+    tx_set_summary.to_csv(output_dir / 'summary_by_tx_set.csv', index=False)
+    
+    # Re-generate report with new data
+    report_path = generate_analysis_report(
+        results_df=results_df,
+        tx_count_summaries=tx_count_summaries,
+        universal_summary=universal_summary,
+        tx_set_summary=tx_set_summary,
+        output_dir=output_dir,
+    )
+    print(f"✓ Extended analysis report saved to: {report_path}")
     
     # Generate plots
     generate_plots(
