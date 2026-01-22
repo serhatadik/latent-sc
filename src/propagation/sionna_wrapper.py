@@ -216,9 +216,8 @@ class SionnaModel(PropagationModel):
         meta_path = self.scene_cache_dir / "scene_meta.yaml"
         
         # Check if scene and metadata already exist
-        should_generate = True # FORCE REGENERATION for debug
-        # if scene_path.exists() and meta_path.exists():
-        if False: # Disabled cache check
+        should_generate = True
+        if scene_path.exists() and meta_path.exists():
 
             try:
                 with open(meta_path, 'r') as f:
