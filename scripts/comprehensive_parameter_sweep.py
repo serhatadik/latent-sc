@@ -615,7 +615,7 @@ def run_single_experiment(
             np_exponent=config['localization']['path_loss_exponent'],
             lambda_reg=0,
             norm_exponent=0,
-            whitening_method='hetero_geo_aware',
+            whitening_method='hetero_diag',
             sigma_noise=sigma_noise,
             eta=eta,
             feature_rho=feature_rho,
@@ -703,14 +703,40 @@ def run_single_experiment(
                 # Extract scores - use normalized_score which is geo_aware_score for hetero_geo_aware
                 # and R^2 normalized score for other methods
                 for item in candidates_history:
-                    # normalized_score contains the appropriate score based on whitening method
-                    score = item.get('normalized_score', item.get('selected_score', 0.0))
+                    # Use raw selected_score to match visualization display values
+                    score = item.get('selected_score', 0.0)
                     glrt_score_history.append(float(score))
                 
                 if glrt_score_history:
                     glrt_initial_score = glrt_score_history[0]
                     glrt_final_score = glrt_score_history[-1]
                     glrt_score_reduction = glrt_initial_score - glrt_final_score
+            
+            # Find closest iteration for each true transmitter
+            height, width = map_data['shape']
+            best_match_iterations = []
+            
+            if len(candidates_history) > 0 and len(true_locs_pixels) > 0:
+                # Get locations of all added candidates in order
+                candidate_locs = []
+                for item in candidates_history:
+                    idx = item['selected_index']
+                    r, c = idx // width, idx % width
+                    candidate_locs.append([c, r]) # x, y for distance calc (or r, c? true_locs_pixels are [col, row])
+                    # Note: true_locs_pixels is usually [col, row] (x, y)
+                    # Let's verify: In run_single_experiment: true_locs_pixels = np.array([tx['coordinates'] for tx ...])
+                    # coordinates in load_transmitter_locations are [col_idx, row_idx]
+                
+                candidate_locs = np.array(candidate_locs)
+                
+                # For each true transmitter, find index of closest candidate
+                for true_tx in true_locs_pixels:
+                    # true_tx is [col, row]
+                    # candidate_locs is [[c, r], [c, r]...]
+                    
+                    dists = np.sqrt(np.sum((candidate_locs - true_tx)**2, axis=1))
+                    best_iter = np.argmin(dists) + 1 # 1-based iteration index
+                    best_match_iterations.append(int(best_iter))
         
         # Convert history to JSON string for CSV storage
         import json
@@ -737,6 +763,7 @@ def run_single_experiment(
             'glrt_final_score': glrt_final_score,
             'glrt_score_reduction': glrt_score_reduction,
             'glrt_score_history': glrt_score_history_str,
+            'best_match_iterations': json.dumps(best_match_iterations), # Store as JSON list
         }
         
     except Exception as e:
@@ -1040,7 +1067,7 @@ def run_comprehensive_sweep(
     print(f"Workers: {n_workers}")
     print(f"Test mode: {test_mode}")
     print(f"Model type: {model_type}")
-    print(f"Whitening method: hetero_geo_aware")
+    print(f"Whitening method: hetero_diag")
     print(f"Feature rho configs: {list(feature_rho_configs.keys())}")
     
     start_time = time.time()
@@ -1279,10 +1306,11 @@ def analyze_glrt_score_correlation(results_df: pd.DataFrame) -> Dict:
         analysis['summary'] = 'GLRT score columns not found in results.'
         return analysis
     
-    # Filter out rows with missing/invalid GLRT scores
+    # Filter out rows with missing/invalid GLRT scores OR missing ALE
     valid_df = results_df[
         (results_df['glrt_final_score'].notna()) & 
-        (results_df['glrt_final_score'] > 0)
+        (results_df['glrt_final_score'] > 0) &
+        (results_df['ale'].notna())
     ].copy()
     
     if len(valid_df) < 10:
@@ -1846,8 +1874,8 @@ def main():
         help='Propagation model (default: tirem)'
     )
     parser.add_argument(
-        '--eta', type=float, default=0.01,
-        help='Eta parameter for heteroscedastic whitening (default: 0.01)'
+        '--eta', type=float, default=0.1,
+        help='Eta parameter for heteroscedastic whitening (default: 0.1)'
     )
     parser.add_argument(
         '--no-visualizations', action='store_true',
@@ -1946,7 +1974,7 @@ def main():
     
     # Sort results for consistent grouping
     results_df = results_df.sort_values(
-        by=['dir_name', 'transmitters', 'random_seed', 'strategy', 'selection_method', 'power_filtering'],
+        by=['dir_name', 'transmitters', 'seed', 'strategy', 'selection_method', 'power_filtering'],
         na_position='last'
     )
     
