@@ -70,10 +70,14 @@ from src.evaluation.metrics import compute_localization_metrics
 # Known transmitter names (alphabetically sorted for canonical ordering)
 KNOWN_TRANSMITTERS = ['guesthouse', 'mario', 'moran', 'ustar', 'wasatch']
 
-# Feature rho configurations to sweep
-# Feature rho configurations to sweep
-FEATURE_RHO_CONFIGS = {
-    'no_normalization': [1e10, 1e10, 1e10, 1e10],  # No normalization
+# Whitening method configurations to sweep
+# Format: (whitening_method, feature_rho)
+# feature_rho: [LOS, Elevation Angle (deg), Obstacle Count, Distance (m)]
+# Smaller rho = feature differences decorrelate sensor errors faster
+AVAILABLE_WHITENING_CONFIGS = {
+    'hetero_diag': ('hetero_diag', None),  # Diagonal heteroscedastic (baseline, no geometry)
+    'hetero_geo_aware': ('hetero_geo_aware', [0.5, 10.0, 1e6, 150.0]),  # Geometry-aware with physics-based rho
+    'hetero_spatial': ('hetero_spatial', None), # Heteroscedastic + Spatial Correlation (Exp Decay)
 }
 
 # Power density thresholds to sweep
@@ -410,9 +414,14 @@ def save_glrt_visualization(
             cbar.set_label(label=score_label, size=18)
             cbar.ax.set_position([0.77, 0.1, 0.04, 0.8])
         
-        # Highlight selected
-        sel_row, sel_col = np.unravel_index(item['selected_index'], map_data['shape'])
-        ax.scatter([sel_col], [sel_row], c='magenta', marker='*', s=400, label='Selected Candidate', zorder=11)
+        # Highlight selected (All candidates in the beam for this iteration)
+        # Check for new 'beam_selected_indices' key, fall back to single 'selected_index'
+        beam_indices = item.get('beam_selected_indices', [item.get('selected_index')])
+        beam_indices = [idx for idx in beam_indices if idx is not None]
+        
+        if beam_indices:
+            sel_rows, sel_cols = np.unravel_index(beam_indices, map_data['shape'])
+            ax.scatter(sel_cols, sel_rows, c='magenta', marker='*', s=400, label='Selected Candidate(s)', zorder=11)
         
         # UTM ticks
         UTM_lat = map_data['UTM_lat']
@@ -528,6 +537,54 @@ def save_glrt_visualization(
             plt.savefig(fig_path, dpi=150, bbox_inches='tight')
             plt.close(fig)
 
+    # === Final Refined Selection Visualization ===
+    if 'final_support' in solver_info and len(solver_info['final_support']) > 0:
+        final_indices = solver_info['final_support']
+        
+        fig = plt.figure(figsize=(13, 8))
+        ax = fig.gca()
+        
+        # Plot sensors
+        ax.scatter(sensor_locations[:, 0], sensor_locations[:, 1],
+                   c=observed_powers_dB, s=150, edgecolor='green',
+                   linewidth=2, cmap='hot', label='Monitoring Locations', zorder=6)
+                   
+        # Plot true TX
+        if len(tx_coords) > 0:
+            ax.scatter(tx_coords[:, 0], tx_coords[:, 1],
+                       marker='x', s=200, c='blue', linewidth=3,
+                       label='True Transmitter Locations', zorder=10)
+                       
+        # Plot Final Selection
+        rows, cols = np.unravel_index(final_indices, map_data['shape'])
+        ax.scatter(cols, rows, c='magenta', marker='*', s=500, 
+                   edgecolor='white', linewidth=1.5,
+                   label=f'Final Selected ({len(final_indices)})', zorder=11)
+        
+        # Formatting
+        UTM_lat = map_data['UTM_lat']
+        UTM_long = map_data['UTM_long']
+        interval = max(1, len(UTM_lat) // 5)
+        tick_values = list(range(0, len(UTM_lat), interval))
+        tick_labels = ['{:.1f}'.format(lat) for lat in UTM_lat[::interval]]
+        plt.xticks(ticks=tick_values, labels=tick_labels, fontsize=14, rotation=0)
+        
+        interval = max(1, len(UTM_long) // 5)
+        tick_values = list(range(0, len(UTM_long), interval))
+        tick_labels = ['{:.1f}'.format(lat) for lat in UTM_long[::interval]]
+        plt.yticks(ticks=[0] + tick_values[1:], labels=[""] + tick_labels[1:], fontsize=14, rotation=90)
+        
+        ax.set_xlim([0, map_data['shape'][1]])
+        ax.set_ylim([0, map_data['shape'][0]])
+        
+        plt.title(f"Final Refined Selection (Total: {len(final_indices)})", fontsize=20)
+        plt.legend(loc='upper right')
+        
+        # Save figure
+        fig_path = vis_dir / "final_selection.png"
+        plt.savefig(fig_path, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+
 
 def run_single_experiment(
     data_info: Dict,
@@ -537,8 +594,9 @@ def run_single_experiment(
     sigma_noise: float,
     selection_method: str,
     use_power_filtering: bool,
-    feature_rho: List[float],
-    feature_rho_name: str,
+    whitening_method: str,
+    feature_rho: Optional[List[float]],
+    whitening_config_name: str,
     power_density_threshold: float = 0.3,
     strategy_name: str = '',
     model_type: str = 'tirem',
@@ -546,6 +604,8 @@ def run_single_experiment(
     output_dir: Optional[Path] = None,
     save_visualization: bool = False,
     verbose: bool = False,
+    beam_width: int = 1,
+    max_pool_size: int = 50,
 ) -> Optional[Dict]:
     """
     Run a single reconstruction experiment.
@@ -604,35 +664,43 @@ def run_single_experiment(
         else:
             model_config_path = None
         
-        # Run reconstruction with hetero_geo_aware whitening
-        tx_map, info = joint_sparse_reconstruction(
-            sensor_locations=sensor_locations,
-            observed_powers_dBm=observed_powers_dB,
-            input_is_linear=False,
-            solve_in_linear_domain=True,
-            map_shape=map_data['shape'],
-            scale=config['spatial']['proxel_size'],
-            np_exponent=config['localization']['path_loss_exponent'],
-            lambda_reg=0,
-            norm_exponent=0,
-            whitening_method='hetero_diag',
-            sigma_noise=sigma_noise,
-            eta=eta,
-            feature_rho=feature_rho,
-            solver='glrt',
-            selection_method=selection_method,
-            use_power_filtering=use_power_filtering,
-            power_density_threshold=power_density_threshold,
-            cluster_max_candidates=30,
-            glrt_max_iter=max(10, len(transmitters) + 5),
-            glrt_threshold=4.0,
-            dedupe_distance_m=25.0,
-            return_linear_scale=False,
-            verbose=False,
-            model_type=model_type,
-            model_config_path=model_config_path,
-            n_jobs=-1
-        )
+        # Run reconstruction
+        reconstruction_kwargs = {
+            'sensor_locations': sensor_locations,
+            'observed_powers_dBm': observed_powers_dB,
+            'input_is_linear': False,
+            'solve_in_linear_domain': True,
+            'map_shape': map_data['shape'],
+            'scale': config['spatial']['proxel_size'],
+            'np_exponent': config['localization']['path_loss_exponent'],
+            'lambda_reg': 0,
+            'norm_exponent': 0,
+            'whitening_method': whitening_method,
+            'sigma_noise': sigma_noise,
+            'eta': eta,
+            'solver': 'glrt',
+            'selection_method': selection_method,
+            'use_power_filtering': use_power_filtering,
+            'power_density_threshold': power_density_threshold,
+            'cluster_max_candidates': 30,
+            'glrt_max_iter': max(10, len(transmitters) + 5),
+            'glrt_threshold': 4.0,
+            'dedupe_distance_m': 25.0,
+            'return_linear_scale': False,
+            'verbose': False,
+            'model_type': model_type,
+            'model_config_path': model_config_path,
+            'n_jobs': -1,
+            'beam_width': beam_width,
+            'max_pool_size': max_pool_size,
+            'pool_refinement': True, # Always enable refinement for sweep
+        }
+        
+        # Add feature_rho only for hetero_geo_aware
+        if feature_rho is not None:
+            reconstruction_kwargs['feature_rho'] = feature_rho
+        
+        tx_map, info = joint_sparse_reconstruction(**reconstruction_kwargs)
         
         elapsed = time.time() - start_time
         
@@ -642,7 +710,7 @@ def run_single_experiment(
             if use_power_filtering:
                 pf_suffix = f'_pf_thresh{power_density_threshold}'
             
-            experiment_name = f"{data_info['name']}_{strategy_name}_{feature_rho_name}_{selection_method}{pf_suffix}"
+            experiment_name = f"{data_info['name']}_{strategy_name}_{whitening_config_name}_{selection_method}{pf_suffix}"
             save_glrt_visualization(
                 info=info,
                 map_data=map_data,
@@ -703,8 +771,11 @@ def run_single_experiment(
                 # Extract scores - use normalized_score which is geo_aware_score for hetero_geo_aware
                 # and R^2 normalized score for other methods
                 for item in candidates_history:
-                    # Use raw selected_score to match visualization display values
-                    score = item.get('selected_score', 0.0)
+                    # Use corrected score for hetero_geo_aware, raw score for others
+                    if whitening_method == 'hetero_geo_aware':
+                        score = item.get('normalized_score', item.get('selected_score', 0.0))
+                    else:
+                        score = item.get('selected_score', 0.0)
                     glrt_score_history.append(float(score))
                 
                 if glrt_score_history:
@@ -793,7 +864,7 @@ def process_single_directory(args: Tuple) -> Tuple[List[Dict], str]:
     ----------
     args : tuple
         (data_info_serializable, config, map_data, all_tx_locations, output_dir_str,
-         test_mode, model_type, eta, save_visualizations, feature_rho_configs,
+         test_mode, model_type, eta, save_visualizations, whitening_configs,
          selection_methods)
     
     Returns
@@ -802,8 +873,8 @@ def process_single_directory(args: Tuple) -> Tuple[List[Dict], str]:
         (list of result dictionaries, skip_reason or None)
     """
     (data_info_serializable, config, map_data, all_tx_locations, output_dir_str,
-     test_mode, model_type, eta, save_visualizations, feature_rho_configs,
-     selection_configs, power_thresholds) = args
+     test_mode, model_type, eta, save_visualizations, whitening_configs,
+     selection_configs, power_thresholds, beam_width, max_pool_size) = args
     
     # Reconstruct data_info with Path object
     data_info = data_info_serializable.copy()
@@ -865,7 +936,7 @@ def process_single_directory(args: Tuple) -> Tuple[List[Dict], str]:
                 thresholds_to_test = power_thresholds if use_pf else [power_thresholds[0]]
                 
                 for threshold in thresholds_to_test:
-                    for rho_name, feature_rho in feature_rho_configs.items():
+                    for config_name, (whitening_method, feature_rho) in whitening_configs.items():
                         attempted += 1
                         try:
                             result = run_single_experiment(
@@ -876,8 +947,9 @@ def process_single_directory(args: Tuple) -> Tuple[List[Dict], str]:
                                 sigma_noise=sigma_noise,
                                 selection_method=sel_method,
                                 use_power_filtering=use_pf,
+                                whitening_method=whitening_method,
                                 feature_rho=feature_rho,
-                                feature_rho_name=rho_name,
+                                whitening_config_name=config_name,
                                 strategy_name=strategy_name,
                                 model_type=model_type,
                                 eta=eta,
@@ -885,6 +957,8 @@ def process_single_directory(args: Tuple) -> Tuple[List[Dict], str]:
                                 save_visualization=save_visualizations,
                                 verbose=False,
                                 power_density_threshold=threshold,
+                                beam_width=beam_width,
+                                max_pool_size=max_pool_size,
                             )
                             
                             if result is not None:
@@ -897,7 +971,7 @@ def process_single_directory(args: Tuple) -> Tuple[List[Dict], str]:
                                     'selection_method': sel_method,
                                     'power_filtering': use_pf,
                                     'power_threshold': threshold if use_pf else float('nan'),
-                                    'feature_rho': rho_name,
+                                    'whitening_config': config_name,
                                     'sigma_noise': sigma_noise,
                                     'sigma_noise_dB': 10 * np.log10(sigma_noise) if sigma_noise > 0 else -np.inf,
                                 })
@@ -946,11 +1020,21 @@ def process_single_directory(args: Tuple) -> Tuple[List[Dict], str]:
     
     # Format message
     # [Dir Name] Comp: X | Best ALE: Y.YYm | Max Pd: P.PP | Max Prec: Z.ZZ | Best C.Err: W.WW
+    # Format message
+    # [Dir Name] Comp: X | Best ALE: Y.YYm | Max Pd: P.PP | Max Prec: Z.ZZ | Best C.Err: W.WW
     msg = (f"[{dir_name}] Comp: {n_completed}/{attempted} | "
            f"Best ALE: {best_ale:.1f}m | "
            f"Max Pd: {max_pd:.2f} | "
            f"Max Prec: {max_prec:.2f} | "
            f"Best C.Err: {best_count_err:.1f}")
+
+    if n_completed > 0:
+        # Identify best result
+        best_result = min(results, key=lambda r: r['ale'])
+        best_params = f"{best_result['strategy']}, {best_result['selection_method']}, {best_result['whitening_config']}"
+        if best_result['power_filtering']:
+             best_params += f", PF={best_result['power_threshold']}"
+        msg += f" | Best Params: [{best_params}]"
            
     if failed > 0:
         msg += f" | Failed: {failed}"
@@ -1010,6 +1094,9 @@ def run_comprehensive_sweep(
     verbose: bool = True,
     n_workers: int = 1,
     power_thresholds: List[float] = None,
+    whitening_configs: Dict = None,
+    beam_width: int = 1,
+    max_pool_size: int = 50,
 ) -> pd.DataFrame:
     """
     Run comprehensive parameter sweep across all directories.
@@ -1034,11 +1121,14 @@ def run_comprehensive_sweep(
         ('cluster', True),
     ]
     
-    # Feature rho configurations
-    feature_rho_configs = FEATURE_RHO_CONFIGS
-    if test_mode:
-        # Only use one config in test mode
-        feature_rho_configs = {'no_normalization': [1e10, 1e10, 1e10, 1e10]}
+    # Whitening configurations
+    if whitening_configs is None:
+        whitening_configs = AVAILABLE_WHITENING_CONFIGS
+        if test_mode:
+             # Only use diagonal in test mode (faster) if not explicitly provided
+             whitening_configs = {'hetero_diag': ('hetero_diag', None)}
+    
+    print(f"Whitening configs to run: {list(whitening_configs.keys())}")
     
     # Filter TX counts if specified
     if tx_counts_filter:
@@ -1067,8 +1157,7 @@ def run_comprehensive_sweep(
     print(f"Workers: {n_workers}")
     print(f"Test mode: {test_mode}")
     print(f"Model type: {model_type}")
-    print(f"Whitening method: hetero_diag")
-    print(f"Feature rho configs: {list(feature_rho_configs.keys())}")
+    print(f"Whitening configs: {list(whitening_configs.keys())}")
     
     start_time = time.time()
     
@@ -1095,9 +1184,11 @@ def run_comprehensive_sweep(
             model_type,
             eta,
             save_visualizations,
-            feature_rho_configs,
+            whitening_configs,
             selection_configs,
             power_thresholds,
+            beam_width,
+            max_pool_size,
         ))
     
     if n_workers == 1:
@@ -1176,8 +1267,8 @@ def analyze_by_tx_count(results_df: pd.DataFrame) -> Dict[int, pd.DataFrame]:
     for tx_count in sorted(results_df['tx_count'].unique()):
         df = results_df[results_df['tx_count'] == tx_count]
         
-        # Group by strategy, selection method, power filtering, threshold, and feature_rho
-        grouped = df.groupby(['strategy', 'selection_method', 'power_filtering', 'power_threshold', 'feature_rho'], dropna=False).agg({
+        # Group by strategy, selection method, power filtering, threshold, and whitening_config
+        grouped = df.groupby(['strategy', 'selection_method', 'power_filtering', 'power_threshold', 'whitening_config'], dropna=False).agg({
             'ale': ['mean', 'std', 'min', 'max', 'count'],
             'pd': ['mean', 'std'],
             'precision': ['mean', 'std'],
@@ -1218,8 +1309,8 @@ def analyze_universal(results_df: pd.DataFrame) -> pd.DataFrame:
     pd.DataFrame
         Summary dataframe
     """
-    # Group by strategy, selection method, power filtering, threshold, and feature_rho
-    grouped = results_df.groupby(['strategy', 'selection_method', 'power_filtering', 'power_threshold', 'feature_rho'], dropna=False).agg({
+    # Group by strategy, selection method, power filtering, threshold, and whitening_config
+    grouped = results_df.groupby(['strategy', 'selection_method', 'power_filtering', 'power_threshold', 'whitening_config'], dropna=False).agg({
         'ale': ['mean', 'std', 'min', 'max', 'count'],
         'pd': ['mean', 'std'],
         'precision': ['mean', 'std'],
@@ -1253,7 +1344,7 @@ def analyze_universal(results_df: pd.DataFrame) -> pd.DataFrame:
 def analyze_by_tx_set(results_df: pd.DataFrame) -> pd.DataFrame:
     """Analyze performance grouped by specific transmitter sets."""
     # Group by key columns
-    group_cols = ['transmitters', 'strategy', 'selection_method', 'power_filtering', 'power_threshold', 'feature_rho']
+    group_cols = ['transmitters', 'strategy', 'selection_method', 'power_filtering', 'power_threshold', 'whitening_config']
     
     # Calculate aggregation
     summary = results_df.groupby(group_cols).agg(
@@ -1455,7 +1546,7 @@ def generate_analysis_report(
     report_lines.append(f"- **TX counts analyzed**: {sorted(results_df['tx_count'].unique())}")
     report_lines.append(f"- **Strategies tested**: {results_df['strategy'].nunique()}")
     report_lines.append(f"- **Selection methods**: {results_df['selection_method'].unique().tolist()}")
-    report_lines.append(f"- **Feature rho configs**: {results_df['feature_rho'].unique().tolist()}")
+    report_lines.append(f"- **Whitening Configs**: {results_df['whitening_config'].unique().tolist()}")
     report_lines.append("")
     
     # Universal Analysis
@@ -1468,7 +1559,7 @@ def generate_analysis_report(
     report_lines.append("")
     report_lines.append(f"- **Strategy**: `{best_row['strategy']}`")
     report_lines.append(f"- **Selection Method**: `{best_row['selection_method']}`")
-    report_lines.append(f"- **Feature Rho**: `{best_row['feature_rho']}`")
+    report_lines.append(f"- **Whitening Config**: `{best_row['whitening_config']}`")
     report_lines.append(f"- **Mean ALE**: {best_row['ale_mean']:.2f} m (±{best_row['ale_std']:.2f})")
     report_lines.append(f"- **Mean Pd**: {best_row['pd_mean']*100:.1f}% (±{best_row['pd_std']*100:.1f})")
     report_lines.append(f"- **Mean Precision**: {best_row['precision_mean']*100:.1f}%")
@@ -1482,15 +1573,15 @@ def generate_analysis_report(
     # Top 10 strategies table
     report_lines.append("### Top 10 Strategies (by Mean ALE)")
     report_lines.append("")
-    report_lines.append("| Rank | Strategy | Selection | Power Filter | Threshold | Feature Rho | Mean ALE (m) | Mean Pd (%) | N |")
-    report_lines.append("|------|----------|-----------|--------------|-----------|-------------|--------------|-------------|---|")
+    report_lines.append("| Rank | Strategy | Selection | Power Filter | Threshold | Whitening Config | Mean ALE (m) | Mean Pd (%) | N |")
+    report_lines.append("|------|----------|-----------|--------------|-----------|------------------|--------------|-------------|---|")
     for i, row in universal_summary.head(10).iterrows():
         rank = universal_summary.index.get_loc(i) + 1
         pf_str = "Yes" if row['power_filtering'] else "No"
         thresh_str = f"{row['power_threshold']}" if row['power_filtering'] else "-"
         report_lines.append(
             f"| {rank} | {row['strategy']} | {row['selection_method']} | {pf_str} | {thresh_str} | "
-            f"{row['feature_rho']} | {row['ale_mean']:.2f} | "
+            f"{row['whitening_config']} | {row['ale_mean']:.2f} | "
             f"{row['pd_mean']*100:.1f} | {int(row['ale_count'])} |"
         )
     report_lines.append("")
@@ -1522,16 +1613,16 @@ def generate_analysis_report(
             report_lines.append(f"- **{method_name}**: Mean ALE = {avg_ale:.2f} m, Mean Pd = {avg_pd*100:.1f}%")
     report_lines.append("")
     
-    # Feature Rho Comparison
-    report_lines.append("### Feature Rho Comparison")
+    # Whitening Config Comparison
+    report_lines.append("### Whitening Config Comparison")
     report_lines.append("")
     
-    for rho_name in results_df['feature_rho'].unique():
-        rho_df = results_df[results_df['feature_rho'] == rho_name]
-        if len(rho_df) > 0:
-            avg_ale = rho_df['ale'].mean()
-            avg_pd = rho_df['pd'].mean()
-            report_lines.append(f"- **{rho_name}**: Mean ALE = {avg_ale:.2f} m, Mean Pd = {avg_pd*100:.1f}%")
+    for config_name in results_df['whitening_config'].unique():
+        config_df = results_df[results_df['whitening_config'] == config_name]
+        if len(config_df) > 0:
+            avg_ale = config_df['ale'].mean()
+            avg_pd = config_df['pd'].mean()
+            report_lines.append(f"- **{config_name}**: Mean ALE = {avg_ale:.2f} m, Mean Pd = {avg_pd*100:.1f}%")
     report_lines.append("")
     
     # Fixed vs Dynamic Comparison
@@ -1570,7 +1661,7 @@ def generate_analysis_report(
         
         if len(summary) > 0:
             best = summary.iloc[0]
-            report_lines.append(f"**Best Strategy**: `{best['strategy']}` with `{best['selection_method']}` and `{best['feature_rho']}`")
+            report_lines.append(f"**Best Strategy**: `{best['strategy']}` with `{best['selection_method']}` and `{best['whitening_config']}`")
             report_lines.append(f"- Mean ALE: {best['ale_mean']:.2f} m (±{best['ale_std']:.2f})")
             report_lines.append(f"- Mean Pd: {best['pd_mean']*100:.1f}%")
             report_lines.append(f"- Mean Precision: {best['precision_mean']*100:.1f}%")
@@ -1581,11 +1672,11 @@ def generate_analysis_report(
             report_lines.append("")
             
             # Top 5 for this TX count
-            report_lines.append("| Strategy | Selection | Feature Rho | Mean ALE | Mean Pd |")
-            report_lines.append("|----------|-----------|-------------|----------|---------|")
+            report_lines.append("| Strategy | Selection | Whitening Config | Mean ALE | Mean Pd |")
+            report_lines.append("|----------|-----------|------------------|----------|---------|")
             for _, row in summary.head(5).iterrows():
                 report_lines.append(
-                    f"| {row['strategy']} | {row['selection_method']} | {row['feature_rho']} | "
+                    f"| {row['strategy']} | {row['selection_method']} | {row['whitening_config']} | "
                     f"{row['ale_mean']:.2f} | {row['pd_mean']*100:.1f}% |"
                 )
             report_lines.append("")
@@ -1688,14 +1779,14 @@ def generate_analysis_report(
             best_per_count[tx_count] = {
                 'strategy': summary.iloc[0]['strategy'],
                 'selection': summary.iloc[0]['selection_method'],
-                'feature_rho': summary.iloc[0]['feature_rho'],
+                'whitening_config': summary.iloc[0]['whitening_config'],
                 'ale': summary.iloc[0]['ale_mean'],
             }
     
     # Check if same strategy is best across counts
     best_strategies = [v['strategy'] for v in best_per_count.values()]
     best_selections = [v['selection'] for v in best_per_count.values()]
-    best_rhos = [v['feature_rho'] for v in best_per_count.values()]
+    best_whitening_configs = [v['whitening_config'] for v in best_per_count.values()]
     
     if len(set(best_strategies)) == 1:
         report_lines.append(f"✓ **Consistent winner**: `{best_strategies[0]}` performs best across all TX counts")
@@ -1713,10 +1804,10 @@ def generate_analysis_report(
     
     report_lines.append("")
     
-    if len(set(best_rhos)) == 1:
-        report_lines.append(f"✓ **Feature rho**: `{best_rhos[0]}` consistently outperforms")
+    if len(set(best_whitening_configs)) == 1:
+        report_lines.append(f"✓ **Whitening Config**: `{best_whitening_configs[0]}` consistently outperforms")
     else:
-        report_lines.append("ℹ **Feature rho**: Results vary by TX count")
+        report_lines.append("ℹ **Whitening Config**: Results vary by TX count")
     
     report_lines.append("")
     
@@ -1765,14 +1856,17 @@ def generate_plots(
     ax.set_title('Selection Method Comparison')
     plt.setp(ax.get_xticklabels(), rotation=15, ha='right')
     
-    # Plot 1c: Feature rho comparison
+    # Plot 1c: Whitening Config comparison
     ax = axes[1, 0]
-    rho_comparison = results_df.groupby('feature_rho')['ale'].agg(['mean', 'std']).reset_index()
-    bars = ax.bar(rho_comparison['feature_rho'], rho_comparison['mean'], 
-                  yerr=rho_comparison['std'], color=['#3498db', '#9b59b6'], capsize=5)
-    ax.set_xlabel('Feature Rho Config')
+    config_comparison = results_df.groupby('whitening_config')['ale'].agg(['mean', 'std']).reset_index()
+    # Use dynamic colors
+    cmap = plt.get_cmap('tab10')
+    whitening_colors = [cmap(i) for i in np.linspace(0, 1, len(config_comparison))]
+    bars = ax.bar(config_comparison['whitening_config'], config_comparison['mean'], 
+                  yerr=config_comparison['std'], color=whitening_colors, capsize=5)
+    ax.set_xlabel('Whitening Config')
     ax.set_ylabel('Mean ALE (m)')
-    ax.set_title('Feature Rho Comparison')
+    ax.set_title('Whitening Config Comparison')
     plt.setp(ax.get_xticklabels(), rotation=15, ha='right')
     
     # Plot 1d: Fixed vs Dynamic boxplot
@@ -1791,7 +1885,7 @@ def generate_plots(
     fig, ax = plt.subplots(figsize=(14, 8))
     
     # Get top strategies
-    top_strategies = universal_summary.head(10)[['strategy', 'selection_method', 'feature_rho']].values.tolist()
+    top_strategies = universal_summary.head(10)[['strategy', 'selection_method', 'whitening_config']].values.tolist()
     
     # Build heatmap data
     heatmap_data = []
@@ -1799,7 +1893,7 @@ def generate_plots(
         row = []
         for strat, sel, rho in top_strategies:
             df = tx_count_summaries[tx_count]
-            match = df[(df['strategy'] == strat) & (df['selection_method'] == sel) & (df['feature_rho'] == rho)]
+            match = df[(df['strategy'] == strat) & (df['selection_method'] == sel) & (df['whitening_config'] == rho)]
             if len(match) > 0:
                 row.append(match.iloc[0]['ale_mean'])
             else:
@@ -1889,6 +1983,18 @@ def main():
         '--power-thresholds', type=str, default=None,
         help='Comma-separated list of power density thresholds to sweep (e.g., "0.01,0.1,0.3")'
     )
+    parser.add_argument(
+        '--whitening-methods', type=str, default=None,
+        help='Comma-separated list of whitening methods to sweep (e.g., "hetero_diag,hetero_spatial")'
+    )
+    parser.add_argument(
+        '--beam-width', type=int, default=1,
+        help='Beam width for GLRT search (default: 1)'
+    )
+    parser.add_argument(
+        '--max-pool-size', type=int, default=50,
+        help='Max candidates for pool refinement (default: 50)'
+    )
     
     args = parser.parse_args()
     
@@ -1902,6 +2008,21 @@ def main():
     tx_counts_filter = None
     if args.tx_counts:
         tx_counts_filter = [int(x.strip()) for x in args.tx_counts.split(',')]
+        
+    # Parse whitening methods
+    whitening_configs = None
+    if args.whitening_methods:
+        methods = [x.strip() for x in args.whitening_methods.split(',')]
+        whitening_configs = {}
+        for m in methods:
+            if m in AVAILABLE_WHITENING_CONFIGS:
+                whitening_configs[m] = AVAILABLE_WHITENING_CONFIGS[m]
+            else:
+                print(f"Warning: Unknown whitening method '{m}', skipping. Available: {list(AVAILABLE_WHITENING_CONFIGS.keys())}")
+        
+        if not whitening_configs:
+            print("Error: No valid whitening methods selected. Exiting.")
+            return
     
     # Set max dirs for test mode
     max_dirs = args.max_dirs
@@ -1949,6 +2070,10 @@ def main():
     
     for tx_count in sorted(grouped_dirs.keys()):
         print(f"  TX count {tx_count}: {len(grouped_dirs[tx_count])} directories")
+        
+    # If using custom whitening configs, print them
+    if whitening_configs:
+        print(f"Custom whitening configs: {list(whitening_configs.keys())}")
     
     # Run comprehensive sweep
     results_df = run_comprehensive_sweep(
@@ -1966,6 +2091,9 @@ def main():
         verbose=True,
         n_workers=args.workers,
         power_thresholds=power_thresholds,
+        whitening_configs=whitening_configs,
+        beam_width=args.beam_width,
+        max_pool_size=args.max_pool_size,
     )
     
     if len(results_df) == 0:
@@ -2034,7 +2162,7 @@ def main():
     
     # Print best overall
     best = universal_summary.iloc[0]
-    print(f"\nBest overall strategy: {best['strategy']} ({best['selection_method']}, {best['feature_rho']})")
+    print(f"\nBest overall strategy: {best['strategy']} ({best['selection_method']}, {best['whitening_config']})")
     print(f"  Mean ALE: {best['ale_mean']:.2f} m")
     print(f"  Mean Pd: {best['pd_mean']*100:.1f}%")
     

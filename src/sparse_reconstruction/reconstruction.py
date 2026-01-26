@@ -38,6 +38,7 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
                                  max_tx_power_dbm=40.0, veto_margin_db=5.0, 
                                  veto_threshold=1e-9, ceiling_penalty_weight=0.1,
                                  verbose=True,
+                                 beam_width=1, pool_refinement=True, max_pool_size=50,
                                  input_is_linear=False, solve_in_linear_domain=None,
                                  **solver_kwargs):
     """
@@ -63,7 +64,7 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
         Shadowing standard deviation (dB), default: 4.5.
         Only used if whitening_method='spatial_corr_exp_decay'.
     delta_c : float, optional
-        Correlation distance (meters), default: 400.
+        Correlation distance (meters), default: 25.
         Only used if whitening_method='spatial_corr_exp_decay'.
     lambda_reg : float, optional
         Sparsity regularization parameter, default: 0.01
@@ -155,6 +156,12 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
         Accumulated linear power contradiction threshold for rejection. Default: 1e-9.
     ceiling_penalty_weight : float, optional
         Weight for the soft power ceiling penalty. Default: 0.1.
+    beam_width : int, optional
+        Number of hypotheses to track in GLRT Beam Search. Default: 1.
+    pool_refinement : bool, optional
+        If True, apply final checks on the pool of candidates. Default: True.
+    max_pool_size : int, optional
+        Max candidates to keep in pool. Default: 50.
     verbose : bool, optional
         Print progress information, default: True
     input_is_linear : bool, optional
@@ -295,11 +302,43 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
         solver_kwargs['whitening_method'] = whitening_method
         solver_kwargs['sigma_noise'] = sigma_noise
         solver_kwargs['eta'] = eta
+
+    elif whitening_method == 'hetero_spatial':
+        if verbose:
+            print("  Using hetero_spatial whitening (heteroscedastic diag + spatial correlation)...")
+            print(f"    sigma_noise: {sigma_noise:.2e}, eta: {eta:.2f}")
+            print(f"    Correlation distance: {delta_c} m")
+
+        # 1. Compute heteroscedastic standard deviations
+        # V_ii = sigma_noise^2 + (eta * P_i)^2
+        # std_i = sqrt(V_ii)
+        v_diag_elements = sigma_noise**2 + (eta * observed_powers_linear)**2
+        std_diag = np.sqrt(v_diag_elements)
+
+        # 2. Compute spatial correlation matrix R
+        # build_covariance_matrix with sigma=1.0 returns correlation matrix (diagonal = 1.0)
+        R = build_covariance_matrix(
+            sensor_locations, sigma=1.0, delta_c=delta_c, scale=scale
+        )
+
+        # 3. Compute Full Covariance V = D * R * D
+        # V_ij = std_i * R_ij * std_j
+        # We can compute this efficiently using broadcasting
+        V = R * np.outer(std_diag, std_diag)
+
+        if verbose:
+            print(f"    Covariance V range: [{V.min():.2e}, {V.max():.2e}]")
+
+        # 4. Compute Whitening Matrix W = V^(-1/2) using Cholesky
+        # IMPORTANT: Set regularization=0.0 because V elements are extremely small (~1e-26) 
+        # and default regularization (1e-10) would completely dominate the matrix structure,
+        # leading to an effective Identity covariance and failed whitening.
+        W = compute_whitening_matrix(V, method='cholesky', verbose=verbose, regularization=0.0)
         
     else:
         raise ValueError(
             f"Unknown whitening_method '{whitening_method}'. "
-            "Choose 'spatial_corr_exp_decay', 'log_inv_power_diag', 'hetero_diag', or 'hetero_geo_aware'"
+            "Choose 'spatial_corr_exp_decay', 'log_inv_power_diag', 'hetero_diag', 'hetero_geo_aware', or 'hetero_spatial'"
         )
 
     # Step 4: Build propagation matrix
@@ -385,6 +424,9 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
             penalty_param=penalty_param,
             sparsity_epsilon=sparsity_epsilon,
             use_linear_objective=solve_in_linear_domain,
+            beam_width=beam_width,
+            pool_refinement=pool_refinement,
+            max_pool_size=max_pool_size,
             **solver_kwargs
         )
     else:
