@@ -301,12 +301,12 @@ def define_sigma_noise_strategies(observed_powers_linear: np.ndarray, test_mode:
     # - fixed_1e-9: 28.1% times best (lowest ALE per directory)
     # - fixed_5e-9: 9.8% success rate, 14.1% times best
     # - 10x_min: 8.7% success rate, 10.9% times best
-    # - 20x_min: 9.9% success rate, 9.4% times best
+    # - 5x_min: Replaces 20x_min (User request)
     # - 0.1_mean: 11.5% success rate (highest), achieved best overall ALE (30.4m)
     strategies = {
         # Min-power based (dynamic, scaled to data)
         '10x_min': 10.0 * min_power,
-        '20x_min': 20.0 * min_power,
+        '5x_min': 5.0 * min_power,
         
         # Mean-power based (best success rate)
         '0.1_mean': 0.1 * mean_power,
@@ -933,7 +933,10 @@ def process_single_directory(args: Tuple) -> Tuple[List[Dict], str]:
             for sel_method, use_pf in selection_configs:
                 # Determine thresholds to test for this selection config
                 # If PF is enabled, test all thresholds. If disabled, test only one (value doesn't matter).
-                thresholds_to_test = power_thresholds if use_pf else [power_thresholds[0]]
+                if use_pf:
+                    thresholds_to_test = power_thresholds
+                else:
+                    thresholds_to_test = [0.0] # Dummy value when PF is disabled
                 
                 for threshold in thresholds_to_test:
                     for config_name, (whitening_method, feature_rho) in whitening_configs.items():
@@ -1120,6 +1123,19 @@ def run_comprehensive_sweep(
         ('max', True),
         ('cluster', True),
     ]
+    
+    # If Beam Search is enabled (width > 1), 'max' and 'cluster' inputs yield identical Hybrid results.
+    # To avoid 2x redundant computation, prune the list to only use 'max' as the representative input.
+    if beam_width > 1:
+        if verbose:
+             print(f"  Beam Search (width={beam_width}) enabled: Pruning redundant 'cluster' selection methods.")
+        selection_configs = [c for c in selection_configs if c[0] == 'max']
+        
+    # If no power thresholds are provided, disable power filtering experiments
+    if not power_thresholds:
+        if verbose:
+            print("  No power density thresholds provided: Disabling power filtering experiments.")
+        selection_configs = [c for c in selection_configs if not c[1]]
     
     # Whitening configurations
     if whitening_configs is None:
@@ -2002,7 +2018,8 @@ def main():
     if args.power_thresholds:
         power_thresholds = [float(x) for x in args.power_thresholds.split(',')]
     else:
-        power_thresholds = POWER_DENSITY_THRESHOLDS
+        # Default changed: If flag omitted, disable power filtering entirely
+        power_thresholds = None
     
     # Parse TX counts filter
     tx_counts_filter = None
