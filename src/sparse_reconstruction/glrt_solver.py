@@ -234,7 +234,8 @@ def _compute_candidate_scores(residual, A_model, W, A_w_norms_sq, denom_storage,
                               observed_powers, max_tx_power_dbm, veto_margin_db, veto_threshold,
                               ceiling_penalty_weight, support, exclusion_mask,
                               map_shape, scale, use_power_filtering, power_density_sigma_m, power_density_threshold, 
-                              sensor_locations, use_edf_penalty=False, edf_threshold=1.5, verbose=False):
+                              sensor_locations, use_edf_penalty=False, edf_threshold=1.5,
+                              use_robust_scoring=False, robust_threshold=6.0, verbose=False):
     """
     Compute GLRT scores for all candidates based on the current residual.
     Encapsulates scoring, physics checks, and masking.
@@ -246,6 +247,12 @@ def _compute_candidate_scores(residual, A_model, W, A_w_norms_sq, denom_storage,
             # r_norm = D^-1 r
             r_norm = D_inv_mat @ residual
             
+            # Robust Scoring (Huber-like)
+            if use_robust_scoring:
+                # Apply soft clipping to normalized residuals to limit outlier influence
+                # This corresponds to using a Huber loss function instead of L2
+                r_norm = np.clip(r_norm, -robust_threshold, robust_threshold)
+
             # calculate weighted_r_all = C_inv_storage @ r_norm (N, M)
             # C_inv_storage is (N, M, M), r_norm is (M,)
             weighted_r_all = np.matmul(C_inv_storage, r_norm) 
@@ -263,6 +270,11 @@ def _compute_candidate_scores(residual, A_model, W, A_w_norms_sq, denom_storage,
         # Current whitened residual
         r_w = W @ residual
         
+        # Robust Scoring (Huber-like)
+        if use_robust_scoring:
+             # Apply soft clipping to whitened residuals
+             r_w = np.clip(r_w, -robust_threshold, robust_threshold)
+
         # Numerator: (A_w^T r_w)^2
         # (N x M) @ (M x 1) -> (N x 1)
         correlations = (W @ A_model).T @ r_w 
@@ -517,7 +529,9 @@ def solve_iterative_glrt(A_model, W, observed_powers,
                          power_density_sigma_m=200.0, power_density_threshold=0.3,
                          max_tx_power_dbm=40.0, veto_margin_db=5.0, 
                          veto_threshold=1e-9, ceiling_penalty_weight=0.1,
+
                          use_edf_penalty=False, edf_threshold=1.5,
+                         use_robust_scoring=False, robust_threshold=6.0,
                          verbose=True, 
                          beam_width=1, pool_refinement=True, max_pool_size=50,
                          **solver_kwargs):
@@ -538,6 +552,10 @@ def solve_iterative_glrt(A_model, W, observed_powers,
         Enable Effective Degree of Freedom (EDF) penalty to penalize candidates relying on single sensors.
     edf_threshold : float, optional
         Min EDF required to avoid penalty. Default: 1.5.
+    use_robust_scoring : bool, optional
+        Enable Huber-like robust loss for GLRT residuals.
+    robust_threshold : float, optional
+         Threshold for robust clipping (in standardized units). Default: 6.0.
     """
     M, N = A_model.shape
     if map_shape is not None:
@@ -646,7 +664,9 @@ def solve_iterative_glrt(A_model, W, observed_powers,
                 observed_powers, max_tx_power_dbm, veto_margin_db, veto_threshold,
                 ceiling_penalty_weight, hyp['support'], solver_kwargs.get('exclusion_mask', None),
                 map_shape, scale, use_power_filtering, power_density_sigma_m, power_density_threshold, 
-                sensor_locations, use_edf_penalty=use_edf_penalty, edf_threshold=edf_threshold, verbose=(verbose and h_idx==0 and k==1)
+                sensor_locations, use_edf_penalty=use_edf_penalty, edf_threshold=edf_threshold,
+                use_robust_scoring=use_robust_scoring, robust_threshold=robust_threshold,
+                verbose=(verbose and h_idx==0 and k==1)
             )
 
             # Capture sparse scores for visualization (from parent)

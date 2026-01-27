@@ -608,6 +608,8 @@ def run_single_experiment(
     max_pool_size: int = 50,
     use_edf_penalty: bool = False,
     edf_threshold: float = 1.5,
+    use_robust_scoring: bool = False,
+    robust_threshold: float = 6.0,
 ) -> Optional[Dict]:
     """
     Run a single reconstruction experiment.
@@ -699,6 +701,8 @@ def run_single_experiment(
             'pool_refinement': True, # Always enable refinement for sweep
             'use_edf_penalty': use_edf_penalty,
             'edf_threshold': edf_threshold,
+            'use_robust_scoring': use_robust_scoring,
+            'robust_threshold': robust_threshold,
         }
         
         # Add feature_rho only for hetero_geo_aware
@@ -881,7 +885,7 @@ def process_single_directory(args: Tuple) -> Tuple[List[Dict], str]:
     (data_info_serializable, config, map_data, all_tx_locations, output_dir_str,
      test_mode, model_type, eta, save_visualizations, whitening_configs,
      selection_configs, power_thresholds, beam_width, max_pool_size,
-     use_edf_penalty, edf_threshold) = args
+     use_edf_penalty, edf_threshold, use_robust_scoring, robust_threshold) = args
     
     # Reconstruct data_info with Path object
     data_info = data_info_serializable.copy()
@@ -972,6 +976,8 @@ def process_single_directory(args: Tuple) -> Tuple[List[Dict], str]:
                                 max_pool_size=max_pool_size,
                                 use_edf_penalty=use_edf_penalty,
                                 edf_threshold=edf_threshold,
+                                use_robust_scoring=use_robust_scoring,
+                                robust_threshold=robust_threshold,
                             )
                             
                             if result is not None:
@@ -991,6 +997,8 @@ def process_single_directory(args: Tuple) -> Tuple[List[Dict], str]:
                                     'sigma_noise_dB': 10 * np.log10(sigma_noise) if sigma_noise > 0 else -np.inf,
                                     'use_edf': use_edf_penalty,
                                     'edf_thresh': edf_threshold if use_edf_penalty else float('nan'),
+                                    'use_robust': use_robust_scoring,
+                                    'robust_thresh': robust_threshold if use_robust_scoring else float('nan'),
                                 })
                                 results.append(result)
                             else:
@@ -1116,6 +1124,8 @@ def run_comprehensive_sweep(
     max_pool_size: int = 50,
     use_edf_penalty: bool = False,
     edf_threshold: float = 1.5,
+    use_robust_scoring: bool = False,
+    robust_threshold: float = 6.0,
 ) -> pd.DataFrame:
     """
     Run comprehensive parameter sweep across all directories.
@@ -1190,6 +1200,8 @@ def run_comprehensive_sweep(
     print(f"Test mode: {test_mode}")
     print(f"Model type: {model_type}")
     print(f"Whitening configs: {list(whitening_configs.keys())}")
+    print(f"EDF Penalty: {use_edf_penalty} (Threshold: {edf_threshold})")
+    print(f"Robust Scoring: {use_robust_scoring} (Threshold: {robust_threshold})")
     
     start_time = time.time()
     
@@ -1223,6 +1235,8 @@ def run_comprehensive_sweep(
             max_pool_size,
             use_edf_penalty,
             edf_threshold,
+            use_robust_scoring,
+            robust_threshold,
         ))
     
     if n_workers == 1:
@@ -2037,6 +2051,14 @@ def main():
         '--edf-threshold', type=float, default=1.5,
         help='Threshold for EDF penalty (default: 1.5)'
     )
+    parser.add_argument(
+        '--use-robust-scoring', action='store_true',
+        help='Enable Robust GLRT scoring (Huber-like loss)'
+    )
+    parser.add_argument(
+        '--robust-threshold', type=float, default=6.0,
+        help='Threshold for robust clipping (default: 6.0)'
+    )
     
     args = parser.parse_args()
     
@@ -2139,6 +2161,8 @@ def main():
         max_pool_size=args.max_pool_size,
         use_edf_penalty=args.use_edf,
         edf_threshold=args.edf_threshold,
+        use_robust_scoring=args.use_robust_scoring,
+        robust_threshold=args.robust_threshold,
     )
     
     if len(results_df) == 0:

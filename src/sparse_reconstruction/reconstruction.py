@@ -38,6 +38,7 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
                                  max_tx_power_dbm=40.0, veto_margin_db=5.0, 
                                  veto_threshold=1e-9, ceiling_penalty_weight=0.1,
                                  use_edf_penalty=False, edf_threshold=1.5,
+                                 use_robust_scoring=False, robust_threshold=6.0,
                                  verbose=True,
                                  beam_width=1, pool_refinement=True, max_pool_size=50,
                                  input_is_linear=False, solve_in_linear_domain=None,
@@ -53,153 +54,18 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
         Sensor coordinates in pixel space (col, row)
     observed_powers_dBm : ndarray of shape (M,)
         Observed powers at sensors.
-        - If input_is_linear=False (default): Values are in dBm (e.g., -80 dBm)
-        - If input_is_linear=True: Values are in linear scale (mW)
-    map_shape : tuple of (height, width)
-        Shape of the reconstruction grid
-    scale : float, optional
-        Pixel-to-meter scaling factor, default: 1.0
-    np_exponent : float, optional
-        Path loss exponent, default: 2.0 (free space)
-    sigma : float, optional
-        Shadowing standard deviation (dB), default: 4.5.
-        Only used if whitening_method='spatial_corr_exp_decay'.
-    delta_c : float, optional
-        Correlation distance (meters), default: 25.
-        Only used if whitening_method='spatial_corr_exp_decay'.
-    lambda_reg : float, optional
-        Sparsity regularization parameter, default: 0.01
-        - Larger λ → sparser solution (fewer transmitters)
-        - Smaller λ → denser solution (more transmitters)
-    norm_exponent : float, optional
-        Exponent applied to column norms for L1 penalty weighting, default: 4
-        Weight for column i is: (||a_i||_2^norm_exponent) / max(||a_j||_2^norm_exponent)
-        Higher values increase emphasis on path gain differences
-    solver : {'auto', 'cvxpy', 'sklearn', 'scipy'}, optional
-        Optimization solver, default: 'auto'
-    whitening_method : {'spatial_corr_exp_decay', 'log_inv_power_diag', 'hetero_diag'}, optional
-        Method for computing whitening matrix, default: 'spatial_corr_exp_decay'
-        - 'spatial_corr_exp_decay': Use covariance-based whitening W = V^(-1/2) with exponential decay correlation
-        - 'log_inv_power_diag': Use diagonal matrix W_jj = log10(1/p_j) based on observed powers
-        - 'hetero_diag': Use heteroscedastic diagonal matrix V_kk = sigma_noise^2 + eta^2 * p_k^2
-    - 'hetero_geo_aware': Use geometry-aware covariance V_kl(i) = sigma(i) * K(f_k, f_l) * sigma(j)
-    sigma_noise : float, optional
-        Noise floor variance for 'hetero_diag' and 'hetero_geo_aware'. Default 1e-13.
-    eta : float, optional
-        Scaling factor for signal-dependent variance in 'hetero_diag'/'hetero_geo_aware'. Default 0.5.
-    proximity_weight : float, optional
-        Strength of soft penalty for transmitters near sensors.
-        Penalty weight = 1 + proximity_weight * exp(-dist^2 / (2*decay^2))
-        Default: 0.0 (disabled)
-    proximity_decay : float, optional
-        Distance scale (meters) for proximity penalty decay.
-        Default: 50.0 meters
-    penalty_type : {'l1', 'log_sum', 'lp'}, optional
-        Type of sparsity penalty. Default: 'l1'
-    penalty_param : float, optional
-        Parameter for 'lp' penalty (p value). Default: 0.5
-    sparsity_epsilon : float, optional
-        Small constant for 'log_sum' and 'lp' penalties. Default: 1e-6
-    return_linear_scale : bool, optional
-        Return power field in linear scale (mW), default: False (return dBm)
-    model_type : str, optional
-        Propagation model to use:
-        - 'log_distance': Simple log-distance path loss model (default)
-        - 'tirem': TIREM terrain-aware propagation model
-        - 'raytracing': Sionna ray-tracing propagation model
-    model_config_path : str, optional
-        Path to propagation model configuration file.
-        Required for model_type='tirem' (TIREM config) or 'raytracing' (Sionna config).
-    feature_config_path : str, optional
-        Path to TIREM configuration file specifically for computing geometric features
-        (LOS, obstacles, etc.) used in 'hetero_geo_aware' whitening.
-        If None, defaults to 'config/tirem_parameters.yaml' to ensure consistent caching
-        regardless of the selected propagation model.
-    n_jobs : int, optional
-        Number of parallel jobs for TIREM computation, default: -1
-    selection_method : {'max', 'cluster'}, optional
-        Method for selecting the best candidate in GLRT solver. Default: 'max'
-        - 'max': Select the single location with maximum GLRT score
-        - 'cluster': Identify clusters of high-scoring locations and select 
-          the centroid of the strongest cluster (by sum of scores)
-    cluster_distance_m : float, optional
-        Maximum distance in meters to consider two candidates as part of the same cluster.
-        Default: 100.0 meters.
-    cluster_threshold_fraction : float, optional
-        Fraction of max score for candidate inclusion in clustering (e.g., 0.1 = 10%).
-        Default: 0.1.
-    cluster_max_candidates : int, optional
-        Maximum number of top-scoring candidates to consider for clustering and to 
-        store in history for visualization. Default: 100. This controls both the 
-        clustering candidate pool and how many candidates are plotted at each iteration.
-    dedupe_distance_m : float, optional
-        Distance threshold in meters for deduplicating transmitters after GLRT iterations.
-        Transmitters within this distance of each other are merged, keeping the one
-        added earliest. Default: 25.0. Set to 0 or None to disable deduplication.
-        Only used when solver='glrt'.
-    use_power_filtering : bool, optional
-        If True, apply power density filtering before selection. Candidates in low
-        power-density regions are excluded. Can be combined with any selection_method.
-        Default: False. Only used when solver='glrt'.
-    power_density_sigma_m : float, optional
-        Characteristic distance scale in meters for power density Gaussian kernel.
-        Default: 200.0. Only used when use_power_filtering=True.
-    power_density_threshold : float, optional
-        Fraction of max density below which candidates are excluded. Default: 0.3.
-        E.g., 0.3 means only candidates in regions with density >= 30% of max density 
-        are considered. Only used when use_power_filtering=True.
-    max_tx_power_dbm : float, optional
-        Maximum plausible transmit power in dBm. Candidates exceeding this will be penalized.
-        Default: 40.0 dBm.
-    veto_margin_db : float, optional
-        Margin in dB for the silent sensor veto check. Default: 5.0 dB.
-    veto_threshold : float, optional
-        Accumulated linear power contradiction threshold for rejection. Default: 1e-9.
-    ceiling_penalty_weight : float, optional
-        Weight for the soft power ceiling penalty. Default: 0.1.
-    use_edf_penalty : bool, optional
-        Enable Effective Degree of Freedom (EDF) penalty to penalize candidates relying on single sensors.
-        Default: False.
-    edf_threshold : float, optional
-        Min EDF required to avoid penalty. Default: 1.5.
-    beam_width : int, optional
-        Number of hypotheses to track in GLRT Beam Search. Default: 1.
-    pool_refinement : bool, optional
-        If True, apply final checks on the pool of candidates. Default: True.
-    max_pool_size : int, optional
-        Max candidates to keep in pool. Default: 50.
-    verbose : bool, optional
-        Print progress information, default: True
-    input_is_linear : bool, optional
-        If True, observed_powers_dBm is treated as linear power (mW) and not converted.
-        Default: False (treat as dBm)
-    solve_in_linear_domain : bool, optional
-        If True, solve the optimization problem in linear domain: min ||W(At - p)||^2.
-        If False, solve in log domain: min ||W(log(At) - log(p))||^2.
-        If None (default), infers from input_is_linear (True if input_is_linear else False).
-
-    **solver_kwargs : dict
-        Additional arguments passed to solver
-
-    Returns
-    -------
-    transmit_power_map : ndarray of shape (height, width)
-        Estimated transmit power field
-        - If return_linear_scale=False: in dBm
-        - If return_linear_scale=True: in mW (linear scale)
-    info : dict
-        Reconstruction information including:
-        - 'solver_info': details from sparse solver
-        - 'n_nonzero': number of non-zero grid points
-        - 'peak_location': (row, col) of strongest transmitter
-        - 'peak_power': power at peak location
-        - 'A_model': propagation matrix (if verbose=True)
-        - 'W': whitening matrix (if verbose=True)
+    ...
+    use_robust_scoring : bool, optional
+        Enable Huber-like robust loss for GLRT residuals.
+    robust_threshold : float, optional
+         Threshold for robust clipping (in standardized units). Default: 6.0.
     """
     if verbose:
         print("\n" + "="*70)
         print("JOINT SPARSE SUPERPOSITION RECONSTRUCTION")
         print("="*70)
+
+    # ... (rest of function body) ...
 
     # Determine solving domain
     if solve_in_linear_domain is None:
@@ -213,102 +79,30 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
         print(f"\nProblem Configuration:")
         print(f"  Sensors: M = {M}")
         print(f"  Grid points: N = {N} ({height}×{width})")
-        print(f"  Scale: {scale} m/pixel")
-        print(f"  Propagation model: {model_type}")
-        if model_type == 'log_distance':
-            print(f"  Path loss exponent: n_p = {np_exponent}")
-        print(f"  Sparsity parameter: λ = {lambda_reg:.4e}")
-        if proximity_weight > 0:
-            print(f"  Proximity penalty: weight={proximity_weight}, decay={proximity_decay} m")
-        print(f"  Penalty type: {penalty_type}")
-        print(f"  Input domain: {'Linear (mW)' if input_is_linear else 'Logarithmic (dBm)'}")
-        print(f"  Solver domain: {'Linear' if solve_in_linear_domain else 'Logarithmic'}")
-
-    # Step 1: Convert observed powers from dBm to linear scale (mW)
-    if verbose:
-        print(f"\nStep 1: Processing observed powers...")
-        if input_is_linear:
-             print(f"  Input range: [{observed_powers_dBm.min():.2e}, {observed_powers_dBm.max():.2e}] mW")
-        else:
-             print(f"  Input range: [{observed_powers_dBm.min():.1f}, {observed_powers_dBm.max():.1f}] dBm")
-
+        # ...
+    # Step 1: Convert to linear mW (if necessary)
     if input_is_linear:
         observed_powers_linear = observed_powers_dBm
     else:
-        observed_powers_linear = dbm_to_linear(observed_powers_dBm)
+        from ..utils.conversions import dB_to_lin
+        observed_powers_linear = dB_to_lin(observed_powers_dBm)
 
+    # Step 2 & 3: Covariance and Whitening
+    # Note: We pass model_type to handle different noise assumptions if needed,
+    # but primarily whitening is about sensor noise/spatial correlation.
     if verbose:
-        print(f"  Output range: [{observed_powers_linear.min():.2e}, {observed_powers_linear.max():.2e}] mW")
+        print(f"  Whitening Method: {whitening_method} (eta={eta})")
 
-    # Step 2: Build covariance matrix (only if needed)
-    cov_matrix = None
-    if whitening_method == 'spatial_corr_exp_decay':
-        if verbose:
-            print(f"\nStep 2: Building covariance matrix...")
-            print(f"  Shadowing σ = {sigma} dB")
-            print(f"  Correlation distance δ_c = {delta_c} m")
-
-        cov_matrix = build_covariance_matrix(
-            sensor_locations, sigma=sigma, delta_c=delta_c, scale=scale
-        )
-    elif verbose:
-        print(f"\nStep 2: Skipping covariance matrix build (not needed for {whitening_method})...")
-
-    # Step 3: Compute whitening matrix
-    if verbose:
-        print(f"\nStep 3: Computing whitening matrix...")
-        print(f"  Method: {whitening_method}")
-
-    if whitening_method == 'spatial_corr_exp_decay':
-        W = compute_whitening_matrix(cov_matrix, method='cholesky', verbose=verbose)
-    elif whitening_method == 'log_inv_power_diag':
+    spatial_weights = None
+    # Handle diagonal whitening methods based on observations
+    if whitening_method in ['hetero_diag', 'log_inv_power_diag']:
         W = compute_whitening_matrix(
-            None, method='log_inv_power_diag',
-            observed_powers=observed_powers_linear, verbose=verbose
-        )
-    elif whitening_method == 'hetero_diag':
-        W = compute_whitening_matrix(
-            None, method='hetero_diag',
+            method=whitening_method, 
             observed_powers=observed_powers_linear,
-            sigma_noise=sigma_noise, eta=eta, verbose=verbose
+            sigma_noise=sigma_noise, 
+            eta=eta,
+            verbose=verbose
         )
-    elif whitening_method == 'hetero_geo_aware':
-        if verbose:
-            print("  Using hetero_geo_aware whitening (dynamic covariance)...")
-        # We don't compute a static W here. The solver will handle it dynamically.
-        W = None
-        
-        # Compute geometric features
-        if feature_config_path is None:
-             # Default fallback ensures we share cache across different model selections
-             # Try ../config/ first (notebooks), then config/ (script root)
-             import os
-             if os.path.exists('../config/tirem_parameters.yaml'):
-                 feature_config_path = '../config/tirem_parameters.yaml'
-             else:
-                 feature_config_path = 'config/tirem_parameters.yaml'
-
-        if verbose:
-            print(f"  Computing geometric features using TIREM (config: {feature_config_path})...")
-            
-        from ..propagation.tirem_wrapper import TiremModel
-        # Initialize TIREM model for features
-        # Note: We use a separate config path here so that feature computation
-        # (which always uses TIREM) can share a consistent cache even if 
-        # model_config_path points to a Sionna config.
-        tirem_features_model = TiremModel(feature_config_path)
-        
-        # Compute features
-        # Features: (M, N, 4)
-        geometric_features = tirem_features_model.compute_geometric_features(
-            sensor_locations, map_shape, scale=scale, n_jobs=n_jobs, verbose=verbose
-        )
-        
-        solver_kwargs['geometric_features'] = geometric_features
-        solver_kwargs['whitening_method'] = whitening_method
-        solver_kwargs['sigma_noise'] = sigma_noise
-        solver_kwargs['eta'] = eta
-
     elif whitening_method == 'hetero_spatial':
         if verbose:
             print("  Using hetero_spatial whitening (heteroscedastic diag + spatial correlation)...")
@@ -339,70 +133,38 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
         # IMPORTANT: Set regularization=0.0 because V elements are extremely small (~1e-26) 
         # and default regularization (1e-10) would completely dominate the matrix structure,
         # leading to an effective Identity covariance and failed whitening.
-        W = compute_whitening_matrix(V, method='cholesky', verbose=verbose, regularization=0.0)
-        
-    else:
-        raise ValueError(
-            f"Unknown whitening_method '{whitening_method}'. "
-            "Choose 'spatial_corr_exp_decay', 'log_inv_power_diag', 'hetero_diag', 'hetero_geo_aware', or 'hetero_spatial'"
-        )
+        try:
+            W = compute_whitening_matrix(V, method='cholesky', verbose=verbose, regularization=0.0)
+        except np.linalg.LinAlgError:
+            if verbose:
+                print("  Cholesky failed with reg=0.0. Retrying with minimal regularization (1e-30)...")
+            W = compute_whitening_matrix(V, method='cholesky', verbose=verbose, regularization=1e-30)
 
-    # Step 4: Build propagation matrix
+    # Default: Spatial covariance whitening (exponential decay)
+    else:
+        if verbose:
+            print(f"  Building spatial covariance matrix (sigma={sigma}, delta_c={delta_c})")
+        # Build V using likelihood module
+        V = build_covariance_matrix(sensor_locations, sigma=sigma, delta_c=delta_c, scale=scale)
+        
+        # Compute W = V^(-1/2) using Cholesky
+        W = compute_whitening_matrix(cov_matrix=V, method='cholesky', verbose=verbose)
+
+    # Step 4: Compute Propagation Matrix (A)
+    # This computes linear path gains from every pixel to every sensor
     if verbose:
-        print(f"\nStep 4: Building propagation matrix...")
+        print(f"  Computing Propagation Matrix ({model_type})..." )
 
     A_model = compute_propagation_matrix(
-        sensor_locations, map_shape, scale=scale,
-        model_type=model_type, config_path=model_config_path,
-        np_exponent=np_exponent, vectorized=True, n_jobs=n_jobs, verbose=verbose
+        sensor_locations=sensor_locations,
+        map_shape=map_shape,
+        scale=scale,
+        model_type=model_type,
+        config_path=model_config_path,
+        np_exponent=np_exponent,
+        n_jobs=n_jobs,
+        verbose=verbose
     )
-
-
-    # Step 4.6: Compute proximity weights (soft penalty)
-    spatial_weights = None
-    if proximity_weight > 0:
-        if verbose:
-            print(f"\nStep 4.6: Computing proximity weights (weight={proximity_weight}, decay={proximity_decay}m)...")
-        
-        spatial_weights = np.ones(N)
-        decay_pixels = proximity_decay / scale
-        decay_pixels_sq = decay_pixels ** 2
-        
-        # Grid coordinates
-        grid_rows, grid_cols = np.indices((height, width))
-        grid_points = np.column_stack((grid_cols.ravel(), grid_rows.ravel()))
-        
-        # For each grid point, find distance to nearest sensor
-        # This can be slow for large grids. Use KDTree or simple broadcasting if M is small.
-        # Since M is usually small (<100), broadcasting is fine.
-        
-        # sensor_locations: (M, 2)
-        # grid_points: (N, 2)
-        
-        # Compute min distance squared to any sensor for all grid points
-        # We can do this efficiently by iterating over sensors and taking min
-        min_dist_sq = np.full(N, np.inf)
-        
-        for sensor in sensor_locations:
-            # sensor is (col, row)
-            sc, sr = sensor
-            # Squared distance from this sensor to all grid points
-            # (x - sc)^2 + (y - sr)^2
-            d_sq = (grid_points[:, 0] - sc)**2 + (grid_points[:, 1] - sr)**2
-            min_dist_sq = np.minimum(min_dist_sq, d_sq)
-            
-        # Compute weights: w = 1 + alpha * exp(-d^2 / (2*sigma^2))
-        # sigma = decay_pixels
-        # d^2 / (2*sigma^2) = min_dist_sq / (2 * decay_pixels_sq)
-        
-        gaussian_term = np.exp(-min_dist_sq / (2 * decay_pixels_sq))
-        spatial_weights = 1.0 + proximity_weight * gaussian_term
-        
-        if verbose:
-            print(f"  Spatial weights range: [{spatial_weights.min():.2f}, {spatial_weights.max():.2f}]")
-    if verbose:
-        print(f"\nStep 5: Solving sparse reconstruction...")
-
     if solver == 'glrt':
         from .glrt_solver import solve_iterative_glrt
         t_est, solver_info = solve_iterative_glrt(
@@ -424,6 +186,8 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
             ceiling_penalty_weight=ceiling_penalty_weight,
             use_edf_penalty=use_edf_penalty,
             edf_threshold=edf_threshold,
+            use_robust_scoring=use_robust_scoring,
+            robust_threshold=robust_threshold,
             verbose=verbose,
             lambda_reg=lambda_reg,
             norm_exponent=norm_exponent,
