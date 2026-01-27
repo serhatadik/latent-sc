@@ -606,6 +606,8 @@ def run_single_experiment(
     verbose: bool = False,
     beam_width: int = 1,
     max_pool_size: int = 50,
+    use_edf_penalty: bool = False,
+    edf_threshold: float = 1.5,
 ) -> Optional[Dict]:
     """
     Run a single reconstruction experiment.
@@ -693,7 +695,10 @@ def run_single_experiment(
             'n_jobs': -1,
             'beam_width': beam_width,
             'max_pool_size': max_pool_size,
+            'max_pool_size': max_pool_size,
             'pool_refinement': True, # Always enable refinement for sweep
+            'use_edf_penalty': use_edf_penalty,
+            'edf_threshold': edf_threshold,
         }
         
         # Add feature_rho only for hetero_geo_aware
@@ -865,7 +870,8 @@ def process_single_directory(args: Tuple) -> Tuple[List[Dict], str]:
     args : tuple
         (data_info_serializable, config, map_data, all_tx_locations, output_dir_str,
          test_mode, model_type, eta, save_visualizations, whitening_configs,
-         selection_methods)
+         selection_methods, power_thresholds, beam_width, max_pool_size,
+         use_edf_penalty, edf_threshold)
     
     Returns
     -------
@@ -874,7 +880,8 @@ def process_single_directory(args: Tuple) -> Tuple[List[Dict], str]:
     """
     (data_info_serializable, config, map_data, all_tx_locations, output_dir_str,
      test_mode, model_type, eta, save_visualizations, whitening_configs,
-     selection_configs, power_thresholds, beam_width, max_pool_size) = args
+     selection_configs, power_thresholds, beam_width, max_pool_size,
+     use_edf_penalty, edf_threshold) = args
     
     # Reconstruct data_info with Path object
     data_info = data_info_serializable.copy()
@@ -960,8 +967,11 @@ def process_single_directory(args: Tuple) -> Tuple[List[Dict], str]:
                                 save_visualization=save_visualizations,
                                 verbose=False,
                                 power_density_threshold=threshold,
+
                                 beam_width=beam_width,
                                 max_pool_size=max_pool_size,
+                                use_edf_penalty=use_edf_penalty,
+                                edf_threshold=edf_threshold,
                             )
                             
                             if result is not None:
@@ -976,7 +986,11 @@ def process_single_directory(args: Tuple) -> Tuple[List[Dict], str]:
                                     'power_threshold': threshold if use_pf else float('nan'),
                                     'whitening_config': config_name,
                                     'sigma_noise': sigma_noise,
+                                    'whitening_config': config_name,
+                                    'sigma_noise': sigma_noise,
                                     'sigma_noise_dB': 10 * np.log10(sigma_noise) if sigma_noise > 0 else -np.inf,
+                                    'use_edf': use_edf_penalty,
+                                    'edf_thresh': edf_threshold if use_edf_penalty else float('nan'),
                                 })
                                 results.append(result)
                             else:
@@ -1100,6 +1114,8 @@ def run_comprehensive_sweep(
     whitening_configs: Dict = None,
     beam_width: int = 1,
     max_pool_size: int = 50,
+    use_edf_penalty: bool = False,
+    edf_threshold: float = 1.5,
 ) -> pd.DataFrame:
     """
     Run comprehensive parameter sweep across all directories.
@@ -1205,6 +1221,8 @@ def run_comprehensive_sweep(
             power_thresholds,
             beam_width,
             max_pool_size,
+            use_edf_penalty,
+            edf_threshold,
         ))
     
     if n_workers == 1:
@@ -2011,6 +2029,14 @@ def main():
         '--max-pool-size', type=int, default=50,
         help='Max candidates for pool refinement (default: 50)'
     )
+    parser.add_argument(
+        '--use-edf', action='store_true',
+        help='Enable Consensus-Based Scoring (EDF) penalty'
+    )
+    parser.add_argument(
+        '--edf-threshold', type=float, default=1.5,
+        help='Threshold for EDF penalty (default: 1.5)'
+    )
     
     args = parser.parse_args()
     
@@ -2111,6 +2137,8 @@ def main():
         whitening_configs=whitening_configs,
         beam_width=args.beam_width,
         max_pool_size=args.max_pool_size,
+        use_edf_penalty=args.use_edf,
+        edf_threshold=args.edf_threshold,
     )
     
     if len(results_df) == 0:

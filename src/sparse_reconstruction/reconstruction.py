@@ -37,6 +37,7 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
                                  use_power_filtering=False, power_density_sigma_m=200.0, power_density_threshold=0.3,
                                  max_tx_power_dbm=40.0, veto_margin_db=5.0, 
                                  veto_threshold=1e-9, ceiling_penalty_weight=0.1,
+                                 use_edf_penalty=False, edf_threshold=1.5,
                                  verbose=True,
                                  beam_width=1, pool_refinement=True, max_pool_size=50,
                                  input_is_linear=False, solve_in_linear_domain=None,
@@ -156,6 +157,11 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
         Accumulated linear power contradiction threshold for rejection. Default: 1e-9.
     ceiling_penalty_weight : float, optional
         Weight for the soft power ceiling penalty. Default: 0.1.
+    use_edf_penalty : bool, optional
+        Enable Effective Degree of Freedom (EDF) penalty to penalize candidates relying on single sensors.
+        Default: False.
+    edf_threshold : float, optional
+        Min EDF required to avoid penalty. Default: 1.5.
     beam_width : int, optional
         Number of hypotheses to track in GLRT Beam Search. Default: 1.
     pool_refinement : bool, optional
@@ -416,6 +422,8 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
             veto_margin_db=veto_margin_db,
             veto_threshold=veto_threshold,
             ceiling_penalty_weight=ceiling_penalty_weight,
+            use_edf_penalty=use_edf_penalty,
+            edf_threshold=edf_threshold,
             verbose=verbose,
             lambda_reg=lambda_reg,
             norm_exponent=norm_exponent,

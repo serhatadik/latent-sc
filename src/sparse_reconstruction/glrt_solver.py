@@ -234,7 +234,7 @@ def _compute_candidate_scores(residual, A_model, W, A_w_norms_sq, denom_storage,
                               observed_powers, max_tx_power_dbm, veto_margin_db, veto_threshold,
                               ceiling_penalty_weight, support, exclusion_mask,
                               map_shape, scale, use_power_filtering, power_density_sigma_m, power_density_threshold, 
-                              sensor_locations, verbose=False):
+                              sensor_locations, use_edf_penalty=False, edf_threshold=1.5, verbose=False):
     """
     Compute GLRT scores for all candidates based on the current residual.
     Encapsulates scoring, physics checks, and masking.
@@ -329,6 +329,54 @@ def _compute_candidate_scores(residual, A_model, W, A_w_norms_sq, denom_storage,
             
             penalties = 1.0 / (1.0 + ceiling_penalty_weight * (excess**2))
             penalty_factors[valid_indices] = penalties
+
+    # CHECK D: Consensus-Based Scoring (EDF Penalty)
+    # Penalize candidates that rely on a single sensor (low Effective Degree of Freedom)
+    if use_edf_penalty and len(valid_indices) > 0:
+        # Re-calculate inputs for EDF if not available
+        # We need element-wise contributions: (W @ A_col) * (W @ residual)
+        # To do this efficiently for all candidates:
+        # A_w is needed.
+        
+        # Check if we have A_w or need to compute it
+        if dynamic_whitening:
+             # Dynamic whitening is harder to vectorize for EDF efficiently if C_inv varies per candidate
+             # For now, skip EDF for dynamic whitening or implement slower loop
+             pass 
+        else:
+             # Standard whitening
+             # r_w = W @ residual (M,)
+             r_w = W @ residual
+             
+             # A_w is (M, N) - we might have it from caller or need to recompute
+             # In standard path, we computed correlations = A_w.T @ r_w
+             # But we didn't store A_w in local scope if we passed A_w_norms_sq
+             # Recompute A_w for the valid indices only to save memory
+             A_subset = A_model[:, valid_indices] # (M, K)
+             A_w_subset = W @ A_subset # (M, K)
+             
+             # contributions: (M, K)
+             # Each column j is the contribution vector for candidate j
+             # c_ij = A_w_ij * r_w_i
+             contributions = A_w_subset * r_w[:, np.newaxis] 
+             
+             # Calculate EDF = (Sum c_i)^2 / Sum (c_i^2)
+             sum_c = np.sum(contributions, axis=0) # (K,) -> Should equal correlations[valid_indices]
+             sum_sq_c = np.sum(contributions**2, axis=0) # (K,)
+             
+             edf_values = (sum_c**2) / (sum_sq_c + 1e-20)
+             
+             # Soft penalty
+             # If EDF < threshold, penalty = EDF / threshold
+             # Or sigmoid? Let's use linear ramp
+             # factor = np.clip(edf_values / edf_threshold, 0.0, 1.0)
+             # But we want to allow > 1.0 to stay 1.0.
+             
+             # Let's use a smoother sigmoid-like or simple ratio
+             weights = np.minimum(edf_values / edf_threshold, 1.0)
+             
+             # Apply
+             penalty_factors[valid_indices] *= weights
 
     # Apply Physics constraints to scores
     scores[~physics_mask] = 0.0
@@ -469,6 +517,7 @@ def solve_iterative_glrt(A_model, W, observed_powers,
                          power_density_sigma_m=200.0, power_density_threshold=0.3,
                          max_tx_power_dbm=40.0, veto_margin_db=5.0, 
                          veto_threshold=1e-9, ceiling_penalty_weight=0.1,
+                         use_edf_penalty=False, edf_threshold=1.5,
                          verbose=True, 
                          beam_width=1, pool_refinement=True, max_pool_size=50,
                          **solver_kwargs):
@@ -485,6 +534,10 @@ def solve_iterative_glrt(A_model, W, observed_powers,
         subset selection optimization. Default: True.
     max_pool_size : int, optional
         Maximum candidates to keep in the pool. Default: 50.
+    use_edf_penalty : bool, optional
+        Enable Effective Degree of Freedom (EDF) penalty to penalize candidates relying on single sensors.
+    edf_threshold : float, optional
+        Min EDF required to avoid penalty. Default: 1.5.
     """
     M, N = A_model.shape
     if map_shape is not None:
@@ -593,7 +646,7 @@ def solve_iterative_glrt(A_model, W, observed_powers,
                 observed_powers, max_tx_power_dbm, veto_margin_db, veto_threshold,
                 ceiling_penalty_weight, hyp['support'], solver_kwargs.get('exclusion_mask', None),
                 map_shape, scale, use_power_filtering, power_density_sigma_m, power_density_threshold, 
-                sensor_locations, verbose=(verbose and h_idx==0 and k==1)
+                sensor_locations, use_edf_penalty=use_edf_penalty, edf_threshold=edf_threshold, verbose=(verbose and h_idx==0 and k==1)
             )
 
             # Capture sparse scores for visualization (from parent)
