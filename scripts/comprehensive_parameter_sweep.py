@@ -83,6 +83,13 @@ AVAILABLE_WHITENING_CONFIGS = {
 # Power density thresholds to sweep
 POWER_DENSITY_THRESHOLDS = [0.01, 0.05, 0.1, 0.2, 0.3]
 
+# Desired column order for results CSV
+DESIRED_COLUMN_ORDER = [
+    'dir_name', 'tx_count', 'transmitters', 'seed', 'strategy', 'selection_method',
+    'power_filtering', 'power_threshold', 'whitening_config', 'sigma_noise',
+    'sigma_noise_dB', 'use_edf', 'edf_thresh', 'use_robust', 'robust_thresh'
+]
+
 # Cache directory for TIREM
 _SCRIPT_DIR = Path(__file__).parent.resolve()
 _PROJECT_ROOT = _SCRIPT_DIR.parent
@@ -323,6 +330,8 @@ def save_glrt_visualization(
     tx_locations: Dict,
     output_dir: Path,
     experiment_name: str,
+    rmse_filtered_support: Optional[List[int]] = None,
+    save_iterations: bool = False,
 ):
     """
     Save GLRT iteration history visualization to files.
@@ -343,7 +352,14 @@ def save_glrt_visualization(
         Directory to save visualization figures
     experiment_name : str
         Name for this experiment (used in filenames)
+    rmse_filtered_support : list, optional
+        List of grid indices that passed RMSE filtering. If provided, these
+        are shown as magenta stars with numbers, while other candidates are
+        shown as black stars (filtered out).
+    save_iterations : bool
+        If True, save visualization for each GLRT iteration. Default False.
     """
+
     if 'solver_info' not in info or 'candidates_history' not in info['solver_info']:
         return
     
@@ -362,9 +378,12 @@ def save_glrt_visualization(
     # Get true TX coordinates
     tx_coords = np.array([tx['coordinates'] for tx in tx_locations.values()])
     
-    for item in history:
-        height, width = map_data['shape']
-        score_map = np.zeros((height, width))
+    # Only save iteration history if requested
+    if save_iterations:
+        for item in history:
+            height, width = map_data['shape']
+            score_map = np.zeros((height, width))
+
         
         top_indices = item['top_indices']
         top_scores = item['top_scores']
@@ -541,6 +560,17 @@ def save_glrt_visualization(
     if 'final_support' in solver_info and len(solver_info['final_support']) > 0:
         final_indices = solver_info['final_support']
         
+        # Determine which candidates are kept vs filtered
+        # Use rmse_filtered_support directly to preserve RMSE-sorted order (lowest to highest)
+        if rmse_filtered_support is not None:
+            kept_set = set(rmse_filtered_support)
+            kept_indices = list(rmse_filtered_support)  # Already sorted by RMSE (lowest first)
+            filtered_indices = [idx for idx in final_indices if idx not in kept_set]
+        else:
+            kept_indices = list(final_indices)
+            filtered_indices = []
+
+        
         fig = plt.figure(figsize=(13, 8))
         ax = fig.gca()
         
@@ -554,21 +584,29 @@ def save_glrt_visualization(
             ax.scatter(tx_coords[:, 0], tx_coords[:, 1],
                        marker='x', s=200, c='blue', linewidth=3,
                        label='True Transmitter Locations', zorder=10)
-                       
-        # Plot Final Selection
-        rows, cols = np.unravel_index(final_indices, map_data['shape'])
-        ax.scatter(cols, rows, c='magenta', marker='*', s=500, 
-                   edgecolor='white', linewidth=1.5,
-                   label=f'Final Selected ({len(final_indices)})', zorder=11)
         
-        # Add numbered annotations to each candidate for association with power analysis plots
-        for idx, (col, row) in enumerate(zip(cols, rows)):
-            ax.annotate(f'{idx+1}', (col, row), textcoords='offset points', 
-                       xytext=(8, 8), fontsize=12, fontweight='bold',
-                       color='black', ha='left', va='bottom',
-                       bbox=dict(boxstyle='round,pad=0.2', facecolor='white', 
-                                edgecolor='magenta', alpha=0.9),
-                       zorder=12)
+        # Plot filtered candidates (black stars, no numbers)
+        if len(filtered_indices) > 0:
+            filt_rows, filt_cols = np.unravel_index(filtered_indices, map_data['shape'])
+            ax.scatter(filt_cols, filt_rows, c='black', marker='*', s=400, 
+                       edgecolor='white', linewidth=1.5,
+                       label=f'Filtered by RMSE ({len(filtered_indices)})', zorder=10)
+        
+        # Plot kept candidates (magenta stars with numbers)
+        if len(kept_indices) > 0:
+            kept_rows, kept_cols = np.unravel_index(kept_indices, map_data['shape'])
+            ax.scatter(kept_cols, kept_rows, c='magenta', marker='*', s=500, 
+                       edgecolor='white', linewidth=1.5,
+                       label=f'Kept ({len(kept_indices)})', zorder=11)
+            
+            # Add numbered annotations to kept candidates for association with power analysis plots
+            for idx, (col, row) in enumerate(zip(kept_cols, kept_rows)):
+                ax.annotate(f'{idx+1}', (col, row), textcoords='offset points', 
+                           xytext=(8, 8), fontsize=12, fontweight='bold',
+                           color='black', ha='left', va='bottom',
+                           bbox=dict(boxstyle='round,pad=0.2', facecolor='white', 
+                                    edgecolor='magenta', alpha=0.9),
+                           zorder=12)
         
         # Formatting
         UTM_lat = map_data['UTM_lat']
@@ -586,13 +624,193 @@ def save_glrt_visualization(
         ax.set_xlim([0, map_data['shape'][1]])
         ax.set_ylim([0, map_data['shape'][0]])
         
-        plt.title(f"Final Refined Selection (Total: {len(final_indices)})", fontsize=20)
+        # Title shows total, kept, and filtered counts
+        title = f"Final Selection: {len(kept_indices)} Kept"
+        if len(filtered_indices) > 0:
+            title += f", {len(filtered_indices)} Filtered (RMSE > 20 dB)"
+        plt.title(title, fontsize=18)
         plt.legend(loc='upper right')
         
         # Save figure
         fig_path = vis_dir / "final_selection.png"
         plt.savefig(fig_path, dpi=150, bbox_inches='tight')
         plt.close(fig)
+
+
+def compute_candidate_power_rmse(
+    final_support: List[int],
+    tx_map: np.ndarray,
+    map_shape: Tuple[int, int],
+    sensor_locations: np.ndarray,
+    observed_powers_dB: np.ndarray,
+    scale: float = 1.0,
+    np_exponent: float = 2.0,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Compute RMSE between predicted and observed power for each candidate transmitter.
+    
+    Parameters
+    ----------
+    final_support : list
+        List of grid indices for candidate transmitters
+    tx_map : ndarray
+        Estimated transmit power map (dBm)
+    map_shape : tuple
+        (height, width) of the map
+    sensor_locations : ndarray
+        Sensor locations in pixel coordinates (col, row)
+    observed_powers_dB : ndarray
+        Observed powers in dBm
+    scale : float
+        Pixel-to-meter scaling factor
+    np_exponent : float
+        Path loss exponent
+        
+    Returns
+    -------
+    rmse_values : ndarray
+        RMSE for each candidate
+    mae_values : ndarray
+        MAE for each candidate
+    """
+    from src.propagation.log_distance import compute_linear_path_gain
+    from src.sparse_reconstruction import linear_to_dbm
+    
+    height, width = map_shape
+    n_candidates = len(final_support)
+    n_sensors = len(sensor_locations)
+    
+    rmse_values = np.zeros(n_candidates)
+    mae_values = np.zeros(n_candidates)
+    
+    for idx, grid_idx in enumerate(final_support):
+        # Convert grid index to (row, col)
+        tx_row = grid_idx // width
+        tx_col = grid_idx % width
+        
+        # Get estimated power at this candidate location
+        est_tx_power_dBm = tx_map[tx_row, tx_col]
+        est_tx_power_linear = 10 ** (est_tx_power_dBm / 10)
+        
+        # Compute predicted powers at each sensor
+        predicted_powers_dBm = np.zeros(n_sensors)
+        
+        for j, sensor_loc in enumerate(sensor_locations):
+            dist_pixels = np.sqrt((sensor_loc[0] - tx_col)**2 + (sensor_loc[1] - tx_row)**2)
+            dist_m = max(dist_pixels * scale, 1.0)
+            
+            path_gain_linear = compute_linear_path_gain(
+                dist_m, np_exponent=np_exponent, di0=1.0, pi0=0.0
+            )
+            
+            predicted_power_linear = est_tx_power_linear * path_gain_linear
+            predicted_powers_dBm[j] = linear_to_dbm(predicted_power_linear)
+        
+        # Compute error metrics
+        power_errors = predicted_powers_dBm - observed_powers_dB
+        rmse_values[idx] = np.sqrt(np.mean(power_errors**2))
+        mae_values[idx] = np.mean(np.abs(power_errors))
+    
+    return rmse_values, mae_values
+
+
+def filter_candidates_by_rmse(
+    final_support: List[int],
+    rmse_values: np.ndarray,
+    output_dir: Optional[Path] = None,
+    experiment_name: Optional[str] = None,
+    min_candidates: int = 1,
+    rmse_threshold: float = 20.0,
+) -> Tuple[List[int], np.ndarray, float]:
+    """
+    Filter candidates by removing those with RMSE above a fixed threshold.
+    
+    Parameters
+    ----------
+    final_support : list
+        List of grid indices for candidate transmitters
+    rmse_values : ndarray
+        RMSE for each candidate (same order as final_support)
+    output_dir : Path, optional
+        Directory to save cutoff visualization
+    experiment_name : str, optional
+        Name for this experiment
+    min_candidates : int
+        Minimum number of candidates to keep (default: 1)
+    rmse_threshold : float
+        Maximum RMSE value to keep a candidate (default: 20.0 dB)
+        
+    Returns
+    -------
+    filtered_support : list
+        Filtered list of grid indices
+    filtered_rmse : ndarray
+        RMSE values for filtered candidates
+    cutoff_rmse : float
+        The RMSE cutoff value used (equal to rmse_threshold)
+    """
+    n_candidates = len(final_support)
+    
+    if n_candidates <= min_candidates:
+        # Not enough candidates to filter
+        return list(final_support), rmse_values.copy(), rmse_threshold
+    
+    # Sort by RMSE for visualization and consistent ordering
+    sort_indices = np.argsort(rmse_values)
+    sorted_rmse = rmse_values[sort_indices]
+    sorted_support = [final_support[i] for i in sort_indices]
+    
+    # Apply fixed threshold: keep candidates with RMSE <= threshold
+    keep_mask = sorted_rmse <= rmse_threshold
+    cutoff_idx = np.sum(keep_mask)
+    
+    # Ensure minimum candidates are kept (take the ones with lowest RMSE)
+    cutoff_idx = max(cutoff_idx, min_candidates)
+    
+    # Filter
+    filtered_support = sorted_support[:cutoff_idx]
+    filtered_rmse = sorted_rmse[:cutoff_idx]
+
+    
+    # Generate cutoff visualization if requested
+    if output_dir is not None and experiment_name is not None:
+        vis_dir = output_dir / 'glrt_visualizations' / experiment_name
+        vis_dir.mkdir(parents=True, exist_ok=True)
+        
+        fig, ax = plt.subplots(figsize=(10, 6))
+        
+        # Plot all candidates' RMSE (sorted)
+        candidate_nums = np.arange(1, n_candidates + 1)
+        colors = ['green' if rmse <= rmse_threshold else 'red' for rmse in sorted_rmse]
+        bars = ax.bar(candidate_nums, sorted_rmse, color=colors, edgecolor='black', alpha=0.8)
+        
+        # Always show threshold line
+        ax.axhline(y=rmse_threshold, color='red', linestyle='--', linewidth=2, 
+                  label=f'Threshold: {rmse_threshold:.1f} dB')
+        
+        # Formatting
+        ax.set_xlabel('Candidate (sorted by RMSE)', fontsize=14)
+        ax.set_ylabel('RMSE (dB)', fontsize=14)
+        ax.set_title(f'RMSE-Based Candidate Filtering (Threshold: {rmse_threshold} dB)\n'
+                    f'Kept: {cutoff_idx}/{n_candidates} candidates', fontsize=14)
+        ax.set_xticks(candidate_nums)
+        ax.grid(True, alpha=0.3, axis='y')
+        
+        # Add legend
+        from matplotlib.patches import Patch
+        legend_elements = [
+            Patch(facecolor='green', edgecolor='black', label=f'Kept ({cutoff_idx})'),
+            Patch(facecolor='red', edgecolor='black', label=f'Filtered ({n_candidates - cutoff_idx})')
+        ]
+        ax.legend(handles=legend_elements, loc='upper left')
+        
+        # Save
+        fig_path = vis_dir / "rmse_cutoff_analysis.png"
+        plt.savefig(fig_path, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+    
+    return filtered_support, filtered_rmse, rmse_threshold
+
 
 
 def save_candidate_power_analysis(
@@ -606,6 +824,7 @@ def save_candidate_power_analysis(
     experiment_name: str,
     scale: float = 1.0,
     np_exponent: float = 2.0,
+    candidate_indices: Optional[List[int]] = None,
 ):
     """
     Generate power estimation analysis plots for each candidate transmitter.
@@ -637,6 +856,9 @@ def save_candidate_power_analysis(
         Pixel-to-meter scaling factor
     np_exponent : float
         Path loss exponent
+    candidate_indices : list, optional
+        If provided, only generate plots for these specific grid indices.
+        If None, generate plots for all candidates in final_support.
     """
     from src.propagation.log_distance import compute_linear_path_gain
     from src.sparse_reconstruction import linear_to_dbm
@@ -650,6 +872,12 @@ def save_candidate_power_analysis(
     if len(final_support) == 0:
         return
     
+    # Use provided candidate_indices or default to final_support
+    if candidate_indices is not None:
+        candidates_to_plot = candidate_indices
+    else:
+        candidates_to_plot = final_support
+    
     # Create output directory
     vis_dir = output_dir / 'glrt_visualizations' / experiment_name
     vis_dir.mkdir(parents=True, exist_ok=True)
@@ -660,7 +888,8 @@ def save_candidate_power_analysis(
     tx_coords = np.array([tx['coordinates'] for tx in tx_locations.values()])
     
     # Process each candidate
-    for idx, grid_idx in enumerate(final_support):
+    for idx, grid_idx in enumerate(candidates_to_plot):
+
         # Convert grid index to (row, col)
         tx_row = grid_idx // width
         tx_col = grid_idx % width
@@ -770,9 +999,11 @@ def run_single_experiment(
     edf_threshold: float = 1.5,
     use_robust_scoring: bool = False,
     robust_threshold: float = 6.0,
+    save_iterations: bool = False,
 ) -> Optional[Dict]:
     """
     Run a single reconstruction experiment.
+
     
     Returns
     -------
@@ -880,6 +1111,58 @@ def run_single_experiment(
                 pf_suffix = f'_pf_thresh{power_density_threshold}'
             
             experiment_name = f"{data_info['name']}_{strategy_name}_{whitening_config_name}_{selection_method}{pf_suffix}"
+            
+            # First, do RMSE-based candidate filtering
+            filtered_support = None
+            if 'solver_info' in info and 'final_support' in info['solver_info']:
+                final_support = info['solver_info']['final_support']
+                
+                if len(final_support) > 0:
+                    scale = config['spatial']['proxel_size']
+                    np_exponent = config['localization']['path_loss_exponent']
+                    
+                    # Step 1: Compute RMSE for all candidates
+                    rmse_values, mae_values = compute_candidate_power_rmse(
+                        final_support=final_support,
+                        tx_map=tx_map,
+                        map_shape=map_data['shape'],
+                        sensor_locations=sensor_locations,
+                        observed_powers_dB=observed_powers_dB,
+                        scale=scale,
+                        np_exponent=np_exponent,
+                    )
+                    
+                    # Step 2: Filter candidates by RMSE threshold
+                    filtered_support, filtered_rmse, cutoff_rmse = filter_candidates_by_rmse(
+                        final_support=final_support,
+                        rmse_values=rmse_values,
+                        output_dir=output_dir,
+                        experiment_name=experiment_name,
+                        min_candidates=1,
+                        rmse_threshold=20.0,
+                    )
+                    
+                    # Store filtered support for metrics computation
+                    info['solver_info']['rmse_filtered_support'] = filtered_support
+                    info['solver_info']['rmse_cutoff'] = cutoff_rmse
+                    info['solver_info']['n_filtered_by_rmse'] = len(final_support) - len(filtered_support)
+                    
+                    # Step 3: Generate power analysis plots only for filtered candidates
+                    save_candidate_power_analysis(
+                        info=info,
+                        tx_map=tx_map,
+                        map_data=map_data,
+                        sensor_locations=sensor_locations,
+                        observed_powers_dB=observed_powers_dB,
+                        tx_locations=tx_locations,
+                        output_dir=output_dir,
+                        experiment_name=experiment_name,
+                        scale=scale,
+                        np_exponent=np_exponent,
+                        candidate_indices=filtered_support,
+                    )
+            
+            # Now save GLRT visualization with filtered support info
             save_glrt_visualization(
                 info=info,
                 map_data=map_data,
@@ -888,22 +1171,12 @@ def run_single_experiment(
                 tx_locations=tx_locations,
                 output_dir=output_dir,
                 experiment_name=experiment_name,
+                rmse_filtered_support=filtered_support,
+                save_iterations=save_iterations,
             )
-            
-            # Generate power analysis plots for each candidate transmitter
-            save_candidate_power_analysis(
-                info=info,
-                tx_map=tx_map,
-                map_data=map_data,
-                sensor_locations=sensor_locations,
-                observed_powers_dB=observed_powers_dB,
-                tx_locations=tx_locations,
-                output_dir=output_dir,
-                experiment_name=experiment_name,
-                scale=config['spatial']['proxel_size'],
-                np_exponent=config['localization']['path_loss_exponent'],
-            )
+
         
+
         # Extract estimated locations
         if 'solver_info' in info and 'support' in info['solver_info']:
             support_indices = info['solver_info']['support']
@@ -1059,7 +1332,7 @@ def process_single_directory(args: Tuple) -> Tuple[List[Dict], str]:
     (data_info_serializable, config, map_data, all_tx_locations, output_dir_str,
      test_mode, model_type, eta, save_visualizations, whitening_configs,
      selection_configs, power_thresholds, beam_width, max_pool_size,
-     use_edf_penalty, edf_threshold, use_robust_scoring, robust_threshold) = args
+     use_edf_penalty, edf_threshold, use_robust_scoring, robust_threshold, save_iterations) = args
     
     # Reconstruct data_info with Path object
     data_info = data_info_serializable.copy()
@@ -1152,7 +1425,9 @@ def process_single_directory(args: Tuple) -> Tuple[List[Dict], str]:
                                 edf_threshold=edf_threshold,
                                 use_robust_scoring=use_robust_scoring,
                                 robust_threshold=robust_threshold,
+                                save_iterations=save_iterations,
                             )
+
                             
                             if result is not None:
                                 result.update({
@@ -1266,6 +1541,23 @@ def append_results_to_csv(results: List[Dict], output_dir: Path):
     csv_path = output_dir / 'all_results.csv'
     df = pd.DataFrame(results)
     
+    # Reorder columns to ensure consistent header
+    existing_cols = list(df.columns)
+    ordered_cols = []
+    
+    # Add desired columns if they are present in the dataframe
+    for col in DESIRED_COLUMN_ORDER:
+        if col in existing_cols:
+            ordered_cols.append(col)
+            
+    # Add remaining columns
+    for col in existing_cols:
+        if col not in ordered_cols:
+            ordered_cols.append(col)
+            
+    # Apply reordering
+    df = df[ordered_cols]
+    
     # Check if file exists to determine if header is needed
     file_exists = csv_path.exists()
     
@@ -1300,6 +1592,7 @@ def run_comprehensive_sweep(
     edf_threshold: float = 1.5,
     use_robust_scoring: bool = False,
     robust_threshold: float = 6.0,
+    save_iterations: bool = False,
 ) -> pd.DataFrame:
     """
     Run comprehensive parameter sweep across all directories.
@@ -1376,6 +1669,8 @@ def run_comprehensive_sweep(
     print(f"Whitening configs: {list(whitening_configs.keys())}")
     print(f"EDF Penalty: {use_edf_penalty} (Threshold: {edf_threshold})")
     print(f"Robust Scoring: {use_robust_scoring} (Threshold: {robust_threshold})")
+    print(f"Save Iterations: {save_iterations}")
+
     
     start_time = time.time()
     
@@ -1411,6 +1706,7 @@ def run_comprehensive_sweep(
             edf_threshold,
             use_robust_scoring,
             robust_threshold,
+            save_iterations,
         ))
     
     if n_workers == 1:
@@ -2233,6 +2529,11 @@ def main():
         '--robust-threshold', type=float, default=6.0,
         help='Threshold for robust clipping (default: 6.0)'
     )
+    parser.add_argument(
+        '--save-iterations', action='store_true',
+        help='Save visualization for each GLRT iteration (default: False)'
+    )
+
     
     args = parser.parse_args()
     
@@ -2337,6 +2638,7 @@ def main():
         edf_threshold=args.edf_threshold,
         use_robust_scoring=args.use_robust_scoring,
         robust_threshold=args.robust_threshold,
+        save_iterations=args.save_iterations,
     )
     
     if len(results_df) == 0:
@@ -2349,6 +2651,24 @@ def main():
         na_position='last'
     )
     
+    # Reorder columns as requested
+    existing_cols = list(results_df.columns)
+    ordered_cols = []
+    
+    # Add desired columns if they are present in the dataframe
+    for col in DESIRED_COLUMN_ORDER:
+        if col in existing_cols:
+            ordered_cols.append(col)
+            
+    # Add remaining columns
+    for col in existing_cols:
+        if col not in ordered_cols:
+            ordered_cols.append(col)
+            
+    # Apply reordering
+    results_df = results_df[ordered_cols]
+    
+
     # Save raw results
     results_path = output_dir / 'all_results.csv'
     results_df.to_csv(results_path, index=False)
