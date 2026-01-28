@@ -87,7 +87,7 @@ POWER_DENSITY_THRESHOLDS = [0.01, 0.05, 0.1, 0.2, 0.3]
 DESIRED_COLUMN_ORDER = [
     'dir_name', 'tx_count', 'transmitters', 'seed', 'strategy', 'selection_method',
     'power_filtering', 'power_threshold', 'whitening_config', 'sigma_noise',
-    'sigma_noise_dB', 'use_edf', 'edf_thresh', 'use_robust', 'robust_thresh'
+    'sigma_noise_dB', 'use_edf', 'edf_thresh', 'use_robust', 'robust_thresh', 'pooling_lambda', 'dedupe_dist'
 ]
 
 # Cache directory for TIREM
@@ -1000,6 +1000,9 @@ def run_single_experiment(
     use_robust_scoring: bool = False,
     robust_threshold: float = 6.0,
     save_iterations: bool = False,
+
+    pooling_lambda: float = 0.01,
+    dedupe_distance_m: float = 60.0,
 ) -> Optional[Dict]:
     """
     Run a single reconstruction experiment.
@@ -1068,7 +1071,7 @@ def run_single_experiment(
             'map_shape': map_data['shape'],
             'scale': config['spatial']['proxel_size'],
             'np_exponent': config['localization']['path_loss_exponent'],
-            'lambda_reg': 0,
+            'lambda_reg': pooling_lambda,
             'norm_exponent': 0,
             'whitening_method': whitening_method,
             'sigma_noise': sigma_noise,
@@ -1080,7 +1083,9 @@ def run_single_experiment(
             'cluster_max_candidates': 30,
             'glrt_max_iter': max(10, len(transmitters) + 5),
             'glrt_threshold': 4.0,
-            'dedupe_distance_m': 25.0,
+            'glrt_max_iter': max(10, len(transmitters) + 5),
+            'glrt_threshold': 4.0,
+            'dedupe_distance_m': dedupe_distance_m,
             'return_linear_scale': False,
             'verbose': False,
             'model_type': model_type,
@@ -1332,7 +1337,8 @@ def process_single_directory(args: Tuple) -> Tuple[List[Dict], str]:
     (data_info_serializable, config, map_data, all_tx_locations, output_dir_str,
      test_mode, model_type, eta, save_visualizations, whitening_configs,
      selection_configs, power_thresholds, beam_width, max_pool_size,
-     use_edf_penalty, edf_threshold, use_robust_scoring, robust_threshold, save_iterations) = args
+
+     use_edf_penalty, edf_threshold, use_robust_scoring, robust_threshold, save_iterations, pooling_lambda, dedupe_distance_m) = args
     
     # Reconstruct data_info with Path object
     data_info = data_info_serializable.copy()
@@ -1425,7 +1431,11 @@ def process_single_directory(args: Tuple) -> Tuple[List[Dict], str]:
                                 edf_threshold=edf_threshold,
                                 use_robust_scoring=use_robust_scoring,
                                 robust_threshold=robust_threshold,
+
                                 save_iterations=save_iterations,
+
+                                pooling_lambda=pooling_lambda,
+                                dedupe_distance_m=dedupe_distance_m,
                             )
 
                             
@@ -1448,6 +1458,9 @@ def process_single_directory(args: Tuple) -> Tuple[List[Dict], str]:
                                     'edf_thresh': edf_threshold if use_edf_penalty else float('nan'),
                                     'use_robust': use_robust_scoring,
                                     'robust_thresh': robust_threshold if use_robust_scoring else float('nan'),
+                                    'robust_thresh': robust_threshold if use_robust_scoring else float('nan'),
+                                    'pooling_lambda': pooling_lambda,
+                                    'dedupe_dist': dedupe_distance_m,
                                 })
                                 results.append(result)
                             else:
@@ -1593,6 +1606,9 @@ def run_comprehensive_sweep(
     use_robust_scoring: bool = False,
     robust_threshold: float = 6.0,
     save_iterations: bool = False,
+
+    pooling_lambda: float = 0.01,
+    dedupe_distance_m: float = 60.0,
 ) -> pd.DataFrame:
     """
     Run comprehensive parameter sweep across all directories.
@@ -1670,6 +1686,9 @@ def run_comprehensive_sweep(
     print(f"EDF Penalty: {use_edf_penalty} (Threshold: {edf_threshold})")
     print(f"Robust Scoring: {use_robust_scoring} (Threshold: {robust_threshold})")
     print(f"Save Iterations: {save_iterations}")
+    print(f"Save Iterations: {save_iterations}")
+    print(f"Pooling Refinement Lambda: {pooling_lambda}")
+    print(f"Dedupe Distance: {dedupe_distance_m}m")
 
     
     start_time = time.time()
@@ -1706,7 +1725,11 @@ def run_comprehensive_sweep(
             edf_threshold,
             use_robust_scoring,
             robust_threshold,
+
             save_iterations,
+
+            pooling_lambda,
+            dedupe_distance_m,
         ))
     
     if n_workers == 1:
@@ -2530,8 +2553,16 @@ def main():
         help='Threshold for robust clipping (default: 6.0)'
     )
     parser.add_argument(
+        '--pooling-lambda', type=float, default=0.01,
+        help='Regularization constant for pooling refinement (active only if refinement enabled)'
+    )
+    parser.add_argument(
         '--save-iterations', action='store_true',
         help='Save visualization for each GLRT iteration (default: False)'
+    )
+    parser.add_argument(
+        '--dedupe-distance', type=float, default=60.0,
+        help='Distance threshold for post-search transmitter deduplication (default: 60.0 m)'
     )
 
     
@@ -2638,7 +2669,11 @@ def main():
         edf_threshold=args.edf_threshold,
         use_robust_scoring=args.use_robust_scoring,
         robust_threshold=args.robust_threshold,
+
         save_iterations=args.save_iterations,
+
+        pooling_lambda=args.pooling_lambda,
+        dedupe_distance_m=args.dedupe_distance,
     )
     
     if len(results_df) == 0:

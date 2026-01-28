@@ -33,7 +33,7 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
                                  model_type='log_distance', model_config_path=None, feature_config_path=None, n_jobs=-1,
                                  selection_method='max', cluster_distance_m=100.0, cluster_threshold_fraction=0.1,
                                  cluster_max_candidates=100,
-                                 dedupe_distance_m=25.0,
+                                 dedupe_distance_m=60.0,
                                  use_power_filtering=False, power_density_sigma_m=200.0, power_density_threshold=0.3,
                                  max_tx_power_dbm=40.0, veto_margin_db=5.0, 
                                  veto_threshold=1e-9, ceiling_penalty_weight=0.1,
