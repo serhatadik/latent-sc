@@ -66,6 +66,13 @@ from src.sparse_reconstruction import (
 # Import evaluation metrics
 from src.evaluation.metrics import compute_localization_metrics
 
+# Import candidate analysis functions
+from scripts.candidate_analysis import (
+    compute_candidate_power_rmse,
+    filter_candidates_by_rmse,
+    save_candidate_power_analysis,
+)
+
 
 # Known transmitter names (alphabetically sorted for canonical ordering)
 KNOWN_TRANSMITTERS = ['guesthouse', 'mario', 'moran', 'ustar', 'wasatch']
@@ -637,343 +644,14 @@ def save_glrt_visualization(
         plt.close(fig)
 
 
-def compute_candidate_power_rmse(
-    final_support: List[int],
-    tx_map: np.ndarray,
-    map_shape: Tuple[int, int],
-    sensor_locations: np.ndarray,
-    observed_powers_dB: np.ndarray,
-    scale: float = 1.0,
-    np_exponent: float = 2.0,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Compute RMSE between predicted and observed power for each candidate transmitter.
-    
-    Parameters
-    ----------
-    final_support : list
-        List of grid indices for candidate transmitters
-    tx_map : ndarray
-        Estimated transmit power map (dBm)
-    map_shape : tuple
-        (height, width) of the map
-    sensor_locations : ndarray
-        Sensor locations in pixel coordinates (col, row)
-    observed_powers_dB : ndarray
-        Observed powers in dBm
-    scale : float
-        Pixel-to-meter scaling factor
-    np_exponent : float
-        Path loss exponent
-        
-    Returns
-    -------
-    rmse_values : ndarray
-        RMSE for each candidate
-    mae_values : ndarray
-        MAE for each candidate
-    """
-    from src.propagation.log_distance import compute_linear_path_gain
-    from src.sparse_reconstruction import linear_to_dbm
-    
-    height, width = map_shape
-    n_candidates = len(final_support)
-    n_sensors = len(sensor_locations)
-    
-    rmse_values = np.zeros(n_candidates)
-    mae_values = np.zeros(n_candidates)
-    
-    for idx, grid_idx in enumerate(final_support):
-        # Convert grid index to (row, col)
-        tx_row = grid_idx // width
-        tx_col = grid_idx % width
-        
-        # Get estimated power at this candidate location
-        est_tx_power_dBm = tx_map[tx_row, tx_col]
-        est_tx_power_linear = 10 ** (est_tx_power_dBm / 10)
-        
-        # Compute predicted powers at each sensor
-        predicted_powers_dBm = np.zeros(n_sensors)
-        
-        for j, sensor_loc in enumerate(sensor_locations):
-            dist_pixels = np.sqrt((sensor_loc[0] - tx_col)**2 + (sensor_loc[1] - tx_row)**2)
-            dist_m = max(dist_pixels * scale, 1.0)
-            
-            path_gain_linear = compute_linear_path_gain(
-                dist_m, np_exponent=np_exponent, di0=1.0, pi0=0.0
-            )
-            
-            predicted_power_linear = est_tx_power_linear * path_gain_linear
-            predicted_powers_dBm[j] = linear_to_dbm(predicted_power_linear)
-        
-        # Compute error metrics
-        power_errors = predicted_powers_dBm - observed_powers_dB
-        rmse_values[idx] = np.sqrt(np.mean(power_errors**2))
-        mae_values[idx] = np.mean(np.abs(power_errors))
-    
-    return rmse_values, mae_values
-
-
-def filter_candidates_by_rmse(
-    final_support: List[int],
-    rmse_values: np.ndarray,
-    output_dir: Optional[Path] = None,
-    experiment_name: Optional[str] = None,
-    min_candidates: int = 1,
-    rmse_threshold: float = 20.0,
-) -> Tuple[List[int], np.ndarray, float]:
-    """
-    Filter candidates by removing those with RMSE above a fixed threshold.
-    
-    Parameters
-    ----------
-    final_support : list
-        List of grid indices for candidate transmitters
-    rmse_values : ndarray
-        RMSE for each candidate (same order as final_support)
-    output_dir : Path, optional
-        Directory to save cutoff visualization
-    experiment_name : str, optional
-        Name for this experiment
-    min_candidates : int
-        Minimum number of candidates to keep (default: 1)
-    rmse_threshold : float
-        Maximum RMSE value to keep a candidate (default: 20.0 dB)
-        
-    Returns
-    -------
-    filtered_support : list
-        Filtered list of grid indices
-    filtered_rmse : ndarray
-        RMSE values for filtered candidates
-    cutoff_rmse : float
-        The RMSE cutoff value used (equal to rmse_threshold)
-    """
-    n_candidates = len(final_support)
-    
-    if n_candidates <= min_candidates:
-        # Not enough candidates to filter
-        return list(final_support), rmse_values.copy(), rmse_threshold
-    
-    # Sort by RMSE for visualization and consistent ordering
-    sort_indices = np.argsort(rmse_values)
-    sorted_rmse = rmse_values[sort_indices]
-    sorted_support = [final_support[i] for i in sort_indices]
-    
-    # Apply fixed threshold: keep candidates with RMSE <= threshold
-    keep_mask = sorted_rmse <= rmse_threshold
-    cutoff_idx = np.sum(keep_mask)
-    
-    # Ensure minimum candidates are kept (take the ones with lowest RMSE)
-    cutoff_idx = max(cutoff_idx, min_candidates)
-    
-    # Filter
-    filtered_support = sorted_support[:cutoff_idx]
-    filtered_rmse = sorted_rmse[:cutoff_idx]
-
-    
-    # Generate cutoff visualization if requested
-    if output_dir is not None and experiment_name is not None:
-        vis_dir = output_dir / 'glrt_visualizations' / experiment_name
-        vis_dir.mkdir(parents=True, exist_ok=True)
-        
-        fig, ax = plt.subplots(figsize=(10, 6))
-        
-        # Plot all candidates' RMSE (sorted)
-        candidate_nums = np.arange(1, n_candidates + 1)
-        colors = ['green' if rmse <= rmse_threshold else 'red' for rmse in sorted_rmse]
-        bars = ax.bar(candidate_nums, sorted_rmse, color=colors, edgecolor='black', alpha=0.8)
-        
-        # Always show threshold line
-        ax.axhline(y=rmse_threshold, color='red', linestyle='--', linewidth=2, 
-                  label=f'Threshold: {rmse_threshold:.1f} dB')
-        
-        # Formatting
-        ax.set_xlabel('Candidate (sorted by RMSE)', fontsize=14)
-        ax.set_ylabel('RMSE (dB)', fontsize=14)
-        ax.set_title(f'RMSE-Based Candidate Filtering (Threshold: {rmse_threshold} dB)\n'
-                    f'Kept: {cutoff_idx}/{n_candidates} candidates', fontsize=14)
-        ax.set_xticks(candidate_nums)
-        ax.grid(True, alpha=0.3, axis='y')
-        
-        # Add legend
-        from matplotlib.patches import Patch
-        legend_elements = [
-            Patch(facecolor='green', edgecolor='black', label=f'Kept ({cutoff_idx})'),
-            Patch(facecolor='red', edgecolor='black', label=f'Filtered ({n_candidates - cutoff_idx})')
-        ]
-        ax.legend(handles=legend_elements, loc='upper left')
-        
-        # Save
-        fig_path = vis_dir / "rmse_cutoff_analysis.png"
-        plt.savefig(fig_path, dpi=150, bbox_inches='tight')
-        plt.close(fig)
-    
-    return filtered_support, filtered_rmse, rmse_threshold
 
 
 
-def save_candidate_power_analysis(
-    info: Dict,
-    tx_map: np.ndarray,
-    map_data: Dict,
-    sensor_locations: np.ndarray,
-    observed_powers_dB: np.ndarray,
-    tx_locations: Dict,
-    output_dir: Path,
-    experiment_name: str,
-    scale: float = 1.0,
-    np_exponent: float = 2.0,
-    candidate_indices: Optional[List[int]] = None,
-):
-    """
-    Generate power estimation analysis plots for each candidate transmitter.
-    
-    For each selected transmitter candidate, this function:
-    1. Computes the predicted power at each sensor using the path loss model
-    2. Compares predicted vs. observed power as a function of distance
-    3. Saves a scatter plot for visual analysis
-    
-    Parameters
-    ----------
-    info : dict
-        Reconstruction info containing solver_info with final_support
-    tx_map : ndarray
-        Estimated transmit power map (dBm)
-    map_data : dict
-        Map data with shape and UTM coordinates
-    sensor_locations : ndarray
-        Sensor locations in pixel coordinates (col, row)
-    observed_powers_dB : ndarray
-        Observed powers in dBm
-    tx_locations : dict
-        True transmitter locations
-    output_dir : Path
-        Directory to save visualization figures
-    experiment_name : str
-        Name for this experiment (used in filenames)
-    scale : float
-        Pixel-to-meter scaling factor
-    np_exponent : float
-        Path loss exponent
-    candidate_indices : list, optional
-        If provided, only generate plots for these specific grid indices.
-        If None, generate plots for all candidates in final_support.
-    """
-    from src.propagation.log_distance import compute_linear_path_gain
-    from src.sparse_reconstruction import linear_to_dbm
-    
-    if 'solver_info' not in info or 'final_support' not in info['solver_info']:
-        return
-    
-    solver_info = info['solver_info']
-    final_support = solver_info['final_support']
-    
-    if len(final_support) == 0:
-        return
-    
-    # Use provided candidate_indices or default to final_support
-    if candidate_indices is not None:
-        candidates_to_plot = candidate_indices
-    else:
-        candidates_to_plot = final_support
-    
-    # Create output directory
-    vis_dir = output_dir / 'glrt_visualizations' / experiment_name
-    vis_dir.mkdir(parents=True, exist_ok=True)
-    
-    height, width = map_data['shape']
-    
-    # Get true TX coordinates for reference
-    tx_coords = np.array([tx['coordinates'] for tx in tx_locations.values()])
-    
-    # Process each candidate
-    for idx, grid_idx in enumerate(candidates_to_plot):
 
-        # Convert grid index to (row, col)
-        tx_row = grid_idx // width
-        tx_col = grid_idx % width
-        tx_pixel = np.array([tx_col, tx_row])  # (col, row) format
-        
-        # Get estimated power at this candidate location (already in dBm from tx_map)
-        est_tx_power_dBm = tx_map[tx_row, tx_col]
-        
-        # Convert TX power to linear (mW) for physical computation
-        est_tx_power_linear = 10 ** (est_tx_power_dBm / 10)
-        
-        # Compute distances and predicted powers at each sensor
-        n_sensors = len(sensor_locations)
-        distances_m = np.zeros(n_sensors)
-        predicted_powers_dBm = np.zeros(n_sensors)
-        
-        for j, sensor_loc in enumerate(sensor_locations):
-            # Distance in pixels, then convert to meters
-            dist_pixels = np.sqrt((sensor_loc[0] - tx_col)**2 + (sensor_loc[1] - tx_row)**2)
-            distances_m[j] = max(dist_pixels * scale, 1.0)  # Minimum 1m to avoid singularity
-            
-            # Compute path gain using log-distance model
-            # Path gain = 1 / d^np_exponent (in linear scale, ignoring reference)
-            path_gain_linear = compute_linear_path_gain(
-                dist_pixels * scale, np_exponent=np_exponent, di0=1.0, pi0=0.0
-            )
-            
-            # Predicted received power = TX power * path gain
-            predicted_power_linear = est_tx_power_linear * path_gain_linear
-            predicted_powers_dBm[j] = linear_to_dbm(predicted_power_linear)
-        
-        # Compute error metrics
-        power_errors = predicted_powers_dBm - observed_powers_dB
-        rmse = np.sqrt(np.mean(power_errors**2))
-        mae = np.mean(np.abs(power_errors))
-        
-        # Create the plot
-        fig, ax = plt.subplots(figsize=(10, 7))
-        
-        # Scatter plot: Observed vs Predicted as a function of distance
-        ax.scatter(distances_m, observed_powers_dB, s=100, c='blue', marker='o', 
-                   edgecolor='black', linewidth=1, label='Observed Power', alpha=0.8)
-        ax.scatter(distances_m, predicted_powers_dBm, s=100, c='red', marker='^',
-                   edgecolor='black', linewidth=1, label='Predicted Power', alpha=0.8)
-        
-        # Connect observed and predicted with lines for each sensor
-        for j in range(n_sensors):
-            ax.plot([distances_m[j], distances_m[j]], 
-                   [observed_powers_dB[j], predicted_powers_dBm[j]], 
-                   'gray', linewidth=1, alpha=0.5)
-        
-        # Formatting
-        ax.set_xlabel('Distance from Candidate TX (m)', fontsize=14)
-        ax.set_ylabel('Received Power (dBm)', fontsize=14)
-        
-        # Check if this candidate is near a true TX
-        is_true_tx = False
-        min_dist_to_true = float('inf')
-        if len(tx_coords) > 0:
-            for true_coord in tx_coords:
-                dist_to_true = np.sqrt((true_coord[0] - tx_col)**2 + (true_coord[1] - tx_row)**2) * scale
-                min_dist_to_true = min(min_dist_to_true, dist_to_true)
-                if dist_to_true < 50:  # Within 50m of true TX
-                    is_true_tx = True
-                    break
-        
-        # Title with metrics
-        true_indicator = " [TRUE TX]" if is_true_tx else ""
-        title = f"Candidate {idx+1} (Grid: {grid_idx}){true_indicator}\n"
-        title += f"Est. TX Power: {est_tx_power_dBm:.1f} dBm | RMSE: {rmse:.1f} dB | MAE: {mae:.1f} dB"
-        ax.set_title(title, fontsize=12)
-        
-        ax.legend(loc='upper right', fontsize=11)
-        ax.grid(True, alpha=0.3)
-        
-        # Add annotation about distance to true TX if applicable
-        if len(tx_coords) > 0 and not is_true_tx:
-            ax.text(0.02, 0.02, f"Nearest True TX: {min_dist_to_true:.0f}m away", 
-                   transform=ax.transAxes, fontsize=10, color='gray')
-        
-        # Save figure
-        fig_path = vis_dir / f"candidate_{idx+1:02d}_power_analysis.png"
-        plt.savefig(fig_path, dpi=150, bbox_inches='tight')
-        plt.close(fig)
+
+
+
+
 
 def run_single_experiment(
     data_info: Dict,
@@ -1126,8 +804,8 @@ def run_single_experiment(
                     scale = config['spatial']['proxel_size']
                     np_exponent = config['localization']['path_loss_exponent']
                     
-                    # Step 1: Compute RMSE for all candidates
-                    rmse_values, mae_values = compute_candidate_power_rmse(
+                    # Step 1: Compute RMSE for all candidates (with bias correction)
+                    rmse_values, mae_values, max_error_values, optimal_tx_powers, slope_values = compute_candidate_power_rmse(
                         final_support=final_support,
                         tx_map=tx_map,
                         map_shape=map_data['shape'],
@@ -1141,10 +819,13 @@ def run_single_experiment(
                     filtered_support, filtered_rmse, cutoff_rmse = filter_candidates_by_rmse(
                         final_support=final_support,
                         rmse_values=rmse_values,
+                        max_error_values=max_error_values,
+                        slope_values=slope_values,
                         output_dir=output_dir,
                         experiment_name=experiment_name,
                         min_candidates=1,
                         rmse_threshold=20.0,
+                        max_error_threshold=30.0,
                     )
                     
                     # Store filtered support for metrics computation
@@ -1686,10 +1367,8 @@ def run_comprehensive_sweep(
     print(f"EDF Penalty: {use_edf_penalty} (Threshold: {edf_threshold})")
     print(f"Robust Scoring: {use_robust_scoring} (Threshold: {robust_threshold})")
     print(f"Save Iterations: {save_iterations}")
-    print(f"Save Iterations: {save_iterations}")
     print(f"Pooling Refinement Lambda: {pooling_lambda}")
     print(f"Dedupe Distance: {dedupe_distance_m}m")
-
     
     start_time = time.time()
     
@@ -1725,9 +1404,7 @@ def run_comprehensive_sweep(
             edf_threshold,
             use_robust_scoring,
             robust_threshold,
-
             save_iterations,
-
             pooling_lambda,
             dedupe_distance_m,
         ))
