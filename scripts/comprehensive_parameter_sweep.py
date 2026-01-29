@@ -71,6 +71,7 @@ from scripts.candidate_analysis import (
     compute_candidate_power_rmse,
     filter_candidates_by_rmse,
     save_candidate_power_analysis,
+    run_combinatorial_selection,
 )
 
 
@@ -94,7 +95,12 @@ POWER_DENSITY_THRESHOLDS = [0.01, 0.05, 0.1, 0.2, 0.3]
 DESIRED_COLUMN_ORDER = [
     'dir_name', 'tx_count', 'transmitters', 'seed', 'strategy', 'selection_method',
     'power_filtering', 'power_threshold', 'whitening_config', 'sigma_noise',
-    'sigma_noise_dB', 'use_edf', 'edf_thresh', 'use_robust', 'robust_thresh', 'pooling_lambda', 'dedupe_dist'
+    'sigma_noise_dB', 'use_edf', 'edf_thresh', 'use_robust', 'robust_thresh', 'pooling_lambda', 'dedupe_dist',
+    # Original metrics (from GLRT support)
+    'ale', 'tp', 'fp', 'fn', 'pd', 'precision', 'f1_score', 'n_estimated',
+    # Combination metrics
+    'combo_n_tx', 'combo_ale', 'combo_tp', 'combo_fp', 'combo_fn', 'combo_pd', 'combo_precision',
+    'combo_count_error', 'combo_rmse', 'combo_bic',
 ]
 
 # Cache directory for TIREM
@@ -681,6 +687,15 @@ def run_single_experiment(
 
     pooling_lambda: float = 0.01,
     dedupe_distance_m: float = 60.0,
+
+    # Combinatorial selection parameters
+    combo_min_distance_m: float = 100.0,
+    combo_max_size: int = 5,
+    combo_max_candidates: int = 10,
+    combo_bic_weight: float = 0.2,
+    combo_max_power_diff_dB: float = 20.0,
+    combo_sensor_proximity_threshold_m: float = 100.0,
+    combo_sensor_proximity_penalty: float = 10.0,
 ) -> Optional[Dict]:
     """
     Run a single reconstruction experiment.
@@ -847,7 +862,39 @@ def run_single_experiment(
                         np_exponent=np_exponent,
                         candidate_indices=filtered_support,
                     )
-            
+
+                    # Step 4: Run combinatorial TX selection optimization
+                    # Find optimal combination of TXs that best explains observations
+                    combination_result = run_combinatorial_selection(
+                        info=info,
+                        tx_map=tx_map,
+                        map_data=map_data,
+                        sensor_locations=sensor_locations,
+                        observed_powers_dB=observed_powers_dB,
+                        tx_locations=tx_locations,
+                        output_dir=output_dir,
+                        experiment_name=experiment_name,
+                        filtered_support=filtered_support,
+                        scale=scale,
+                        np_exponent=np_exponent,
+                        min_distance_m=combo_min_distance_m,
+                        max_combination_size=combo_max_size,
+                        max_candidates_to_consider=combo_max_candidates,
+                        bic_penalty_weight=combo_bic_weight,
+                        max_power_diff_dB=combo_max_power_diff_dB,
+                        sensor_proximity_threshold_m=combo_sensor_proximity_threshold_m,
+                        sensor_proximity_penalty=combo_sensor_proximity_penalty,
+                        max_plots=10,  # Max combination plots to generate
+                        verbose=False,
+                    )
+
+                    # Store combination result in info
+                    info['solver_info']['combination_result'] = combination_result
+                    info['solver_info']['optimal_combination'] = combination_result.get('best_combination', [])
+                    info['solver_info']['optimal_powers_dBm'] = combination_result.get('best_powers_dBm', np.array([]))
+                    info['solver_info']['combination_rmse'] = combination_result.get('best_rmse', np.inf)
+                    info['solver_info']['combination_bic'] = combination_result.get('best_bic', np.inf)
+
             # Now save GLRT visualization with filtered support info
             save_glrt_visualization(
                 info=info,
@@ -895,7 +942,32 @@ def run_single_experiment(
             scale=config['spatial']['proxel_size'],
             tolerance=200.0
         )
-        
+
+        # Compute metrics for optimal combination (if available)
+        combo_metrics = {'combo_ale': np.nan, 'combo_tp': 0, 'combo_fp': 0, 'combo_fn': 0, 'combo_pd': 0.0, 'combo_precision': 0.0}
+        if 'solver_info' in info and 'optimal_combination' in info['solver_info']:
+            optimal_combo = info['solver_info']['optimal_combination']
+            if len(optimal_combo) > 0:
+                height, width = map_data['shape']
+                combo_rows = [idx // width for idx in optimal_combo]
+                combo_cols = [idx % width for idx in optimal_combo]
+                combo_locs_pixels = np.column_stack((combo_cols, combo_rows))
+
+                combo_metrics_raw = compute_localization_metrics(
+                    true_locations=true_locs_pixels,
+                    estimated_locations=combo_locs_pixels,
+                    scale=config['spatial']['proxel_size'],
+                    tolerance=200.0
+                )
+                combo_metrics = {
+                    'combo_ale': combo_metrics_raw['ale'],
+                    'combo_tp': combo_metrics_raw['tp'],
+                    'combo_fp': combo_metrics_raw['fp'],
+                    'combo_fn': combo_metrics_raw['fn'],
+                    'combo_pd': combo_metrics_raw['pd'],
+                    'combo_precision': combo_metrics_raw['precision'],
+                }
+
         # Extract GLRT score history from solver info
         glrt_score_history = []
         glrt_n_iterations = 0
@@ -977,8 +1049,24 @@ def run_single_experiment(
             'glrt_score_reduction': glrt_score_reduction,
             'glrt_score_history': glrt_score_history_str,
             'best_match_iterations': json.dumps(best_match_iterations), # Store as JSON list
+            # Combinatorial selection metrics
+            'combo_n_tx': len(info.get('solver_info', {}).get('optimal_combination', [])),
+            'combo_rmse': info.get('solver_info', {}).get('combination_rmse', np.nan),
+            'combo_bic': info.get('solver_info', {}).get('combination_bic', np.nan),
+            'combo_indices': json.dumps(info.get('solver_info', {}).get('optimal_combination', [])),
+            'combo_powers_dBm': json.dumps(
+                [float(p) for p in info.get('solver_info', {}).get('optimal_powers_dBm', [])]
+            ),
+            # Combinatorial selection localization metrics
+            'combo_ale': combo_metrics['combo_ale'],
+            'combo_tp': combo_metrics['combo_tp'],
+            'combo_fp': combo_metrics['combo_fp'],
+            'combo_fn': combo_metrics['combo_fn'],
+            'combo_pd': combo_metrics['combo_pd'],
+            'combo_precision': combo_metrics['combo_precision'],
+            'combo_count_error': abs(len(info.get('solver_info', {}).get('optimal_combination', [])) - len(true_locs_pixels)),
         }
-        
+
     except Exception as e:
         if verbose:
             print(f"    FAILED: {e}")
@@ -1018,8 +1106,10 @@ def process_single_directory(args: Tuple) -> Tuple[List[Dict], str]:
     (data_info_serializable, config, map_data, all_tx_locations, output_dir_str,
      test_mode, model_type, eta, save_visualizations, whitening_configs,
      selection_configs, power_thresholds, beam_width, max_pool_size,
-
-     use_edf_penalty, edf_threshold, use_robust_scoring, robust_threshold, save_iterations, pooling_lambda, dedupe_distance_m) = args
+     use_edf_penalty, edf_threshold, use_robust_scoring, robust_threshold, save_iterations,
+     pooling_lambda, dedupe_distance_m,
+     combo_min_distance_m, combo_max_size, combo_max_candidates, combo_bic_weight, combo_max_power_diff_dB,
+     combo_sensor_proximity_threshold_m, combo_sensor_proximity_penalty) = args
     
     # Reconstruct data_info with Path object
     data_info = data_info_serializable.copy()
@@ -1117,6 +1207,15 @@ def process_single_directory(args: Tuple) -> Tuple[List[Dict], str]:
 
                                 pooling_lambda=pooling_lambda,
                                 dedupe_distance_m=dedupe_distance_m,
+
+                                # Combinatorial selection parameters
+                                combo_min_distance_m=combo_min_distance_m,
+                                combo_max_size=combo_max_size,
+                                combo_max_candidates=combo_max_candidates,
+                                combo_bic_weight=combo_bic_weight,
+                                combo_max_power_diff_dB=combo_max_power_diff_dB,
+                                combo_sensor_proximity_threshold_m=combo_sensor_proximity_threshold_m,
+                                combo_sensor_proximity_penalty=combo_sensor_proximity_penalty,
                             )
 
                             
@@ -1263,6 +1362,265 @@ def append_results_to_csv(results: List[Dict], output_dir: Path):
         print(f"Warning: Failed to append results to CSV: {e}")
 
 
+def save_bic_results_csv(results_df: pd.DataFrame, output_dir: Path):
+    """
+    Save a simplified BIC-only results CSV with key metrics from combinatorial selection.
+
+    The CSV contains:
+    - dir_name: Directory name
+    - transmitters: TX identifiers
+    - seed: Random seed
+    - strategy: GLRT strategy
+    - whitening_config: Whitening configuration
+    - tx_count: True TX count
+    - combo_n_tx: Number of TXs in optimal combination
+    - combo_ale: Average Localization Error from BIC selection
+    - combo_pd: Probability of Detection from BIC selection
+    - combo_precision: Precision from BIC selection
+    - combo_count_error: |true_tx_count - estimated_tx_count|
+
+    Parameters
+    ----------
+    results_df : pd.DataFrame
+        Full results dataframe
+    output_dir : Path
+        Output directory
+    """
+    # Select only BIC-relevant columns (including strategy and whitening config)
+    bic_columns = [
+        'dir_name',
+        'transmitters',
+        'seed',
+        'strategy',
+        'whitening_config',
+        'tx_count',
+        'combo_n_tx',
+        'combo_ale',
+        'combo_pd',
+        'combo_precision',
+        'combo_count_error',
+    ]
+
+    # Filter to columns that exist
+    available_columns = [col for col in bic_columns if col in results_df.columns]
+
+    if len(available_columns) == 0:
+        print("Warning: No BIC columns found in results")
+        return
+
+    bic_df = results_df[available_columns].copy()
+
+    # Sort by dir_name, transmitters, seed, strategy, whitening_config
+    sort_cols = [col for col in ['dir_name', 'transmitters', 'seed', 'strategy', 'whitening_config'] if col in bic_df.columns]
+    if sort_cols:
+        bic_df = bic_df.sort_values(sort_cols)
+
+    # Save to CSV
+    csv_path = output_dir / 'all_results_bic.csv'
+    bic_df.to_csv(csv_path, index=False)
+    print(f"BIC results saved to: {csv_path}")
+    print(f"  Total rows: {len(bic_df)}")
+
+    # Print summary statistics
+    if 'combo_ale' in bic_df.columns:
+        valid_ale = bic_df['combo_ale'].dropna()
+        if len(valid_ale) > 0:
+            print(f"  Mean ALE: {valid_ale.mean():.2f} m")
+    if 'combo_pd' in bic_df.columns:
+        valid_pd = bic_df['combo_pd'].dropna()
+        if len(valid_pd) > 0:
+            print(f"  Mean Pd: {valid_pd.mean()*100:.1f}%")
+    if 'combo_precision' in bic_df.columns:
+        valid_prec = bic_df['combo_precision'].dropna()
+        if len(valid_prec) > 0:
+            print(f"  Mean Precision: {valid_prec.mean()*100:.1f}%")
+    if 'combo_count_error' in bic_df.columns:
+        valid_ce = bic_df['combo_count_error'].dropna()
+        if len(valid_ce) > 0:
+            print(f"  Mean Count Error: {valid_ce.mean():.2f}")
+
+    return bic_df
+
+
+def generate_bic_analysis_report(bic_df: pd.DataFrame, output_dir: Path):
+    """
+    Generate a markdown analysis report for BIC-based combinatorial selection results.
+
+    Parameters
+    ----------
+    bic_df : pd.DataFrame
+        BIC results dataframe
+    output_dir : Path
+        Output directory
+    """
+    report_lines = []
+    report_lines.append("# BIC Combinatorial Selection Analysis Report")
+    report_lines.append("")
+    report_lines.append(f"Generated: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    report_lines.append("")
+
+    # Overall Summary
+    report_lines.append("## Overall Summary")
+    report_lines.append("")
+    report_lines.append(f"- **Total experiments**: {len(bic_df)}")
+
+    if 'tx_count' in bic_df.columns:
+        report_lines.append(f"- **TX count range**: {int(bic_df['tx_count'].min())} - {int(bic_df['tx_count'].max())}")
+
+    report_lines.append("")
+    report_lines.append("### Aggregate Metrics")
+    report_lines.append("")
+    report_lines.append("| Metric | Mean | Std | Min | Max |")
+    report_lines.append("|--------|------|-----|-----|-----|")
+
+    for col, name in [('combo_ale', 'ALE (m)'), ('combo_pd', 'Pd'), ('combo_precision', 'Precision'), ('combo_count_error', 'Count Error')]:
+        if col in bic_df.columns:
+            valid = bic_df[col].dropna()
+            if len(valid) > 0:
+                if col in ['combo_pd', 'combo_precision']:
+                    report_lines.append(f"| {name} | {valid.mean()*100:.1f}% | {valid.std()*100:.1f}% | {valid.min()*100:.1f}% | {valid.max()*100:.1f}% |")
+                else:
+                    report_lines.append(f"| {name} | {valid.mean():.2f} | {valid.std():.2f} | {valid.min():.2f} | {valid.max():.2f} |")
+
+    # Analysis by Strategy
+    if 'strategy' in bic_df.columns:
+        report_lines.append("")
+        report_lines.append("## Analysis by Strategy")
+        report_lines.append("")
+        report_lines.append("| Strategy | Count | Mean ALE | Mean Pd | Mean Precision | Mean Count Error |")
+        report_lines.append("|----------|-------|----------|---------|----------------|------------------|")
+
+        for strategy in sorted(bic_df['strategy'].unique()):
+            subset = bic_df[bic_df['strategy'] == strategy]
+            count = len(subset)
+            ale = subset['combo_ale'].mean() if 'combo_ale' in subset.columns else np.nan
+            pd_val = subset['combo_pd'].mean() if 'combo_pd' in subset.columns else np.nan
+            prec = subset['combo_precision'].mean() if 'combo_precision' in subset.columns else np.nan
+            ce = subset['combo_count_error'].mean() if 'combo_count_error' in subset.columns else np.nan
+
+            ale_str = f"{ale:.2f}" if not np.isnan(ale) else "-"
+            pd_str = f"{pd_val*100:.1f}%" if not np.isnan(pd_val) else "-"
+            prec_str = f"{prec*100:.1f}%" if not np.isnan(prec) else "-"
+            ce_str = f"{ce:.2f}" if not np.isnan(ce) else "-"
+
+            report_lines.append(f"| {strategy} | {count} | {ale_str} | {pd_str} | {prec_str} | {ce_str} |")
+
+    # Analysis by Whitening Config
+    if 'whitening_config' in bic_df.columns:
+        report_lines.append("")
+        report_lines.append("## Analysis by Whitening Configuration")
+        report_lines.append("")
+        report_lines.append("| Whitening Config | Count | Mean ALE | Mean Pd | Mean Precision | Mean Count Error |")
+        report_lines.append("|------------------|-------|----------|---------|----------------|------------------|")
+
+        for wc in sorted(bic_df['whitening_config'].unique()):
+            subset = bic_df[bic_df['whitening_config'] == wc]
+            count = len(subset)
+            ale = subset['combo_ale'].mean() if 'combo_ale' in subset.columns else np.nan
+            pd_val = subset['combo_pd'].mean() if 'combo_pd' in subset.columns else np.nan
+            prec = subset['combo_precision'].mean() if 'combo_precision' in subset.columns else np.nan
+            ce = subset['combo_count_error'].mean() if 'combo_count_error' in subset.columns else np.nan
+
+            ale_str = f"{ale:.2f}" if not np.isnan(ale) else "-"
+            pd_str = f"{pd_val*100:.1f}%" if not np.isnan(pd_val) else "-"
+            prec_str = f"{prec*100:.1f}%" if not np.isnan(prec) else "-"
+            ce_str = f"{ce:.2f}" if not np.isnan(ce) else "-"
+
+            report_lines.append(f"| {wc} | {count} | {ale_str} | {pd_str} | {prec_str} | {ce_str} |")
+
+    # Analysis by TX Count
+    if 'tx_count' in bic_df.columns:
+        report_lines.append("")
+        report_lines.append("## Analysis by True TX Count")
+        report_lines.append("")
+        report_lines.append("| TX Count | Experiments | Mean ALE | Mean Pd | Mean Precision | Mean Count Error | Mean Est. TXs |")
+        report_lines.append("|----------|-------------|----------|---------|----------------|------------------|---------------|")
+
+        for tx_count in sorted(bic_df['tx_count'].unique()):
+            subset = bic_df[bic_df['tx_count'] == tx_count]
+            count = len(subset)
+            ale = subset['combo_ale'].mean() if 'combo_ale' in subset.columns else np.nan
+            pd_val = subset['combo_pd'].mean() if 'combo_pd' in subset.columns else np.nan
+            prec = subset['combo_precision'].mean() if 'combo_precision' in subset.columns else np.nan
+            ce = subset['combo_count_error'].mean() if 'combo_count_error' in subset.columns else np.nan
+            est_tx = subset['combo_n_tx'].mean() if 'combo_n_tx' in subset.columns else np.nan
+
+            ale_str = f"{ale:.2f}" if not np.isnan(ale) else "-"
+            pd_str = f"{pd_val*100:.1f}%" if not np.isnan(pd_val) else "-"
+            prec_str = f"{prec*100:.1f}%" if not np.isnan(prec) else "-"
+            ce_str = f"{ce:.2f}" if not np.isnan(ce) else "-"
+            est_str = f"{est_tx:.2f}" if not np.isnan(est_tx) else "-"
+
+            report_lines.append(f"| {int(tx_count)} | {count} | {ale_str} | {pd_str} | {prec_str} | {ce_str} | {est_str} |")
+
+    # Analysis by Strategy + Whitening (Top configurations)
+    if 'strategy' in bic_df.columns and 'whitening_config' in bic_df.columns:
+        report_lines.append("")
+        report_lines.append("## Best Configurations (by Mean ALE)")
+        report_lines.append("")
+
+        grouped = bic_df.groupby(['strategy', 'whitening_config']).agg({
+            'combo_ale': ['mean', 'std', 'count'],
+            'combo_pd': 'mean',
+            'combo_precision': 'mean',
+            'combo_count_error': 'mean'
+        }).reset_index()
+
+        # Flatten column names
+        grouped.columns = ['strategy', 'whitening_config', 'ale_mean', 'ale_std', 'count', 'pd_mean', 'prec_mean', 'ce_mean']
+
+        # Sort by ALE mean (lower is better)
+        grouped = grouped.sort_values('ale_mean')
+
+        report_lines.append("| Rank | Strategy | Whitening | Count | Mean ALE | Std ALE | Mean Pd | Mean Prec | Mean CE |")
+        report_lines.append("|------|----------|-----------|-------|----------|---------|---------|-----------|---------|")
+
+        for i, row in grouped.head(10).iterrows():
+            rank = grouped.index.get_loc(i) + 1
+            ale_str = f"{row['ale_mean']:.2f}" if not np.isnan(row['ale_mean']) else "-"
+            ale_std_str = f"{row['ale_std']:.2f}" if not np.isnan(row['ale_std']) else "-"
+            pd_str = f"{row['pd_mean']*100:.1f}%" if not np.isnan(row['pd_mean']) else "-"
+            prec_str = f"{row['prec_mean']*100:.1f}%" if not np.isnan(row['prec_mean']) else "-"
+            ce_str = f"{row['ce_mean']:.2f}" if not np.isnan(row['ce_mean']) else "-"
+
+            report_lines.append(f"| {rank} | {row['strategy']} | {row['whitening_config']} | {int(row['count'])} | {ale_str} | {ale_std_str} | {pd_str} | {prec_str} | {ce_str} |")
+
+    # TX Count Estimation Accuracy
+    if 'tx_count' in bic_df.columns and 'combo_n_tx' in bic_df.columns:
+        report_lines.append("")
+        report_lines.append("## TX Count Estimation Accuracy")
+        report_lines.append("")
+
+        # Perfect count rate
+        perfect_count = (bic_df['combo_count_error'] == 0).sum()
+        total = len(bic_df)
+        report_lines.append(f"- **Perfect count rate**: {perfect_count}/{total} ({perfect_count/total*100:.1f}%)")
+
+        # Under/over estimation
+        under = (bic_df['combo_n_tx'] < bic_df['tx_count']).sum()
+        over = (bic_df['combo_n_tx'] > bic_df['tx_count']).sum()
+        exact = (bic_df['combo_n_tx'] == bic_df['tx_count']).sum()
+        report_lines.append(f"- **Under-estimation**: {under} ({under/total*100:.1f}%)")
+        report_lines.append(f"- **Exact**: {exact} ({exact/total*100:.1f}%)")
+        report_lines.append(f"- **Over-estimation**: {over} ({over/total*100:.1f}%)")
+
+        report_lines.append("")
+        report_lines.append("### Count Error Distribution")
+        report_lines.append("")
+        report_lines.append("| Count Error | Occurrences | Percentage |")
+        report_lines.append("|-------------|-------------|------------|")
+
+        for ce in sorted(bic_df['combo_count_error'].unique()):
+            ce_count = (bic_df['combo_count_error'] == ce).sum()
+            report_lines.append(f"| {int(ce)} | {ce_count} | {ce_count/total*100:.1f}% |")
+
+    # Save report
+    report_path = output_dir / 'analysis_report_bic.md'
+    with open(report_path, 'w') as f:
+        f.write('\n'.join(report_lines))
+
+    print(f"BIC analysis report saved to: {report_path}")
+
 
 def run_comprehensive_sweep(
     grouped_dirs: Dict[int, List[Dict]],
@@ -1290,6 +1648,15 @@ def run_comprehensive_sweep(
 
     pooling_lambda: float = 0.01,
     dedupe_distance_m: float = 60.0,
+
+    # Combinatorial selection parameters
+    combo_min_distance_m: float = 100.0,
+    combo_max_size: int = 5,
+    combo_max_candidates: int = 10,
+    combo_bic_weight: float = 0.2,
+    combo_max_power_diff_dB: float = 20.0,
+    combo_sensor_proximity_threshold_m: float = 100.0,
+    combo_sensor_proximity_penalty: float = 10.0,
 ) -> pd.DataFrame:
     """
     Run comprehensive parameter sweep across all directories.
@@ -1369,7 +1736,15 @@ def run_comprehensive_sweep(
     print(f"Save Iterations: {save_iterations}")
     print(f"Pooling Refinement Lambda: {pooling_lambda}")
     print(f"Dedupe Distance: {dedupe_distance_m}m")
-    
+    print(f"\nCombinatorial Selection:")
+    print(f"  Min TX Distance: {combo_min_distance_m}m")
+    print(f"  Max Combination Size: {combo_max_size}")
+    print(f"  Max Candidates: {combo_max_candidates}")
+    print(f"  BIC Penalty Weight: {combo_bic_weight}")
+    print(f"  Max Power Diff: {combo_max_power_diff_dB}dB")
+    print(f"  Sensor Proximity Threshold: {combo_sensor_proximity_threshold_m}m")
+    print(f"  Sensor Proximity Penalty: {combo_sensor_proximity_penalty}")
+
     start_time = time.time()
     
     # Prepare serializable arguments for each directory
@@ -1407,6 +1782,14 @@ def run_comprehensive_sweep(
             save_iterations,
             pooling_lambda,
             dedupe_distance_m,
+            # Combinatorial selection parameters
+            combo_min_distance_m,
+            combo_max_size,
+            combo_max_candidates,
+            combo_bic_weight,
+            combo_max_power_diff_dB,
+            combo_sensor_proximity_threshold_m,
+            combo_sensor_proximity_penalty,
         ))
     
     if n_workers == 1:
@@ -2242,7 +2625,36 @@ def main():
         help='Distance threshold for post-search transmitter deduplication (default: 60.0 m)'
     )
 
-    
+    # Combinatorial selection arguments
+    parser.add_argument(
+        '--combo-min-distance', type=float, default=100.0,
+        help='Minimum distance between paired TXs in combinatorial selection (default: 100.0 m)'
+    )
+    parser.add_argument(
+        '--combo-max-size', type=int, default=5,
+        help='Maximum number of TXs in a combination (default: 5)'
+    )
+    parser.add_argument(
+        '--combo-max-candidates', type=int, default=10,
+        help='Maximum number of top candidates to consider for combinations (default: 10)'
+    )
+    parser.add_argument(
+        '--combo-bic-weight', type=float, default=0.2,
+        help='BIC penalty weight for model complexity (default: 0.2)'
+    )
+    parser.add_argument(
+        '--combo-max-power-diff', type=float, default=20.0,
+        help='Maximum TX power difference in dB for combinations (default: 20.0)'
+    )
+    parser.add_argument(
+        '--combo-sensor-proximity-threshold', type=float, default=100.0,
+        help='Distance threshold (m) for sensor proximity penalty (default: 100.0)'
+    )
+    parser.add_argument(
+        '--combo-sensor-proximity-penalty', type=float, default=10.0,
+        help='Constant BIC penalty for each TX within proximity threshold of a sensor (default: 10.0)'
+    )
+
     args = parser.parse_args()
     
     # Parse thresholds list
@@ -2351,6 +2763,15 @@ def main():
 
         pooling_lambda=args.pooling_lambda,
         dedupe_distance_m=args.dedupe_distance,
+
+        # Combinatorial selection parameters
+        combo_min_distance_m=args.combo_min_distance,
+        combo_max_size=args.combo_max_size,
+        combo_max_candidates=args.combo_max_candidates,
+        combo_bic_weight=args.combo_bic_weight,
+        combo_max_power_diff_dB=args.combo_max_power_diff,
+        combo_sensor_proximity_threshold_m=args.combo_sensor_proximity_threshold,
+        combo_sensor_proximity_penalty=args.combo_sensor_proximity_penalty,
     )
     
     if len(results_df) == 0:
@@ -2385,7 +2806,13 @@ def main():
     results_path = output_dir / 'all_results.csv'
     results_df.to_csv(results_path, index=False)
     print(f"\n✓ Raw results saved to: {results_path}")
-    
+
+    # Save BIC-only results CSV and generate BIC analysis report
+    print("\nSaving BIC results...")
+    bic_df = save_bic_results_csv(results_df, output_dir)
+    if bic_df is not None and len(bic_df) > 0:
+        generate_bic_analysis_report(bic_df, output_dir)
+
     # Generate analysis
     print("\nGenerating analysis...")
     tx_count_summaries = analyze_by_tx_count(results_df)
