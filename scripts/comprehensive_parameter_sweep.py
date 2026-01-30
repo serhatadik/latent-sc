@@ -799,56 +799,56 @@ def run_single_experiment(
             reconstruction_kwargs['feature_rho'] = feature_rho
         
         tx_map, info = joint_sparse_reconstruction(**reconstruction_kwargs)
-        
+
         elapsed = time.time() - start_time
-        
-        # Save GLRT visualization if requested
-        if save_visualization and output_dir is not None:
-            pf_suffix = ''
-            if use_power_filtering:
-                pf_suffix = f'_pf_thresh{power_density_threshold}'
-            
-            experiment_name = f"{data_info['name']}_{strategy_name}_{whitening_config_name}_{selection_method}{pf_suffix}"
-            
-            # First, do RMSE-based candidate filtering
-            filtered_support = None
-            if 'solver_info' in info and 'final_support' in info['solver_info']:
-                final_support = info['solver_info']['final_support']
-                
-                if len(final_support) > 0:
-                    scale = config['spatial']['proxel_size']
-                    np_exponent = config['localization']['path_loss_exponent']
-                    
-                    # Step 1: Compute RMSE for all candidates (with bias correction)
-                    rmse_values, mae_values, max_error_values, optimal_tx_powers, slope_values = compute_candidate_power_rmse(
-                        final_support=final_support,
-                        tx_map=tx_map,
-                        map_shape=map_data['shape'],
-                        sensor_locations=sensor_locations,
-                        observed_powers_dB=observed_powers_dB,
-                        scale=scale,
-                        np_exponent=np_exponent,
-                    )
-                    
-                    # Step 2: Filter candidates by RMSE threshold
-                    filtered_support, filtered_rmse, cutoff_rmse = filter_candidates_by_rmse(
-                        final_support=final_support,
-                        rmse_values=rmse_values,
-                        max_error_values=max_error_values,
-                        slope_values=slope_values,
-                        output_dir=output_dir,
-                        experiment_name=experiment_name,
-                        min_candidates=1,
-                        rmse_threshold=20.0,
-                        max_error_threshold=30.0,
-                    )
-                    
-                    # Store filtered support for metrics computation
-                    info['solver_info']['rmse_filtered_support'] = filtered_support
-                    info['solver_info']['rmse_cutoff'] = cutoff_rmse
-                    info['solver_info']['n_filtered_by_rmse'] = len(final_support) - len(filtered_support)
-                    
-                    # Step 3: Generate power analysis plots only for filtered candidates
+
+        # Build experiment name for any file outputs
+        pf_suffix = ''
+        if use_power_filtering:
+            pf_suffix = f'_pf_thresh{power_density_threshold}'
+        experiment_name = f"{data_info['name']}_{strategy_name}_{whitening_config_name}_{selection_method}{pf_suffix}"
+
+        # Always do RMSE-based candidate filtering and combinatorial selection (needed for BIC metrics)
+        filtered_support = None
+        if 'solver_info' in info and 'final_support' in info['solver_info']:
+            final_support = info['solver_info']['final_support']
+
+            if len(final_support) > 0:
+                scale = config['spatial']['proxel_size']
+                np_exponent = config['localization']['path_loss_exponent']
+
+                # Step 1: Compute RMSE for all candidates (with bias correction)
+                rmse_values, mae_values, max_error_values, optimal_tx_powers, slope_values = compute_candidate_power_rmse(
+                    final_support=final_support,
+                    tx_map=tx_map,
+                    map_shape=map_data['shape'],
+                    sensor_locations=sensor_locations,
+                    observed_powers_dB=observed_powers_dB,
+                    scale=scale,
+                    np_exponent=np_exponent,
+                )
+
+                # Step 2: Filter candidates by RMSE threshold
+                filtered_support, filtered_rmse, cutoff_rmse = filter_candidates_by_rmse(
+                    final_support=final_support,
+                    rmse_values=rmse_values,
+                    max_error_values=max_error_values,
+                    slope_values=slope_values,
+                    output_dir=output_dir,
+                    experiment_name=experiment_name,
+                    min_candidates=1,
+                    rmse_threshold=20.0,
+                    max_error_threshold=30.0,
+                    save_plot=save_visualization,  # Only save plot if visualizing
+                )
+
+                # Store filtered support for metrics computation
+                info['solver_info']['rmse_filtered_support'] = filtered_support
+                info['solver_info']['rmse_cutoff'] = cutoff_rmse
+                info['solver_info']['n_filtered_by_rmse'] = len(final_support) - len(filtered_support)
+
+                # Step 3: Generate power analysis plots only if visualizations requested
+                if save_visualization and output_dir is not None:
                     save_candidate_power_analysis(
                         info=info,
                         tx_map=tx_map,
@@ -863,39 +863,42 @@ def run_single_experiment(
                         candidate_indices=filtered_support,
                     )
 
-                    # Step 4: Run combinatorial TX selection optimization
-                    # Find optimal combination of TXs that best explains observations
-                    combination_result = run_combinatorial_selection(
-                        info=info,
-                        tx_map=tx_map,
-                        map_data=map_data,
-                        sensor_locations=sensor_locations,
-                        observed_powers_dB=observed_powers_dB,
-                        tx_locations=tx_locations,
-                        output_dir=output_dir,
-                        experiment_name=experiment_name,
-                        filtered_support=filtered_support,
-                        scale=scale,
-                        np_exponent=np_exponent,
-                        min_distance_m=combo_min_distance_m,
-                        max_combination_size=combo_max_size,
-                        max_candidates_to_consider=combo_max_candidates,
-                        bic_penalty_weight=combo_bic_weight,
-                        max_power_diff_dB=combo_max_power_diff_dB,
-                        sensor_proximity_threshold_m=combo_sensor_proximity_threshold_m,
-                        sensor_proximity_penalty=combo_sensor_proximity_penalty,
-                        max_plots=10,  # Max combination plots to generate
-                        verbose=False,
-                    )
+                # Step 4: Run combinatorial TX selection optimization (always, for BIC)
+                # Find optimal combination of TXs that best explains observations
+                # Only generate plots if save_visualization is True
+                combination_result = run_combinatorial_selection(
+                    info=info,
+                    tx_map=tx_map,
+                    map_data=map_data,
+                    sensor_locations=sensor_locations,
+                    observed_powers_dB=observed_powers_dB,
+                    tx_locations=tx_locations,
+                    output_dir=output_dir,
+                    experiment_name=experiment_name,
+                    filtered_support=filtered_support,
+                    scale=scale,
+                    np_exponent=np_exponent,
+                    min_distance_m=combo_min_distance_m,
+                    max_combination_size=combo_max_size,
+                    max_candidates_to_consider=combo_max_candidates,
+                    bic_penalty_weight=combo_bic_weight,
+                    max_power_diff_dB=combo_max_power_diff_dB,
+                    sensor_proximity_threshold_m=combo_sensor_proximity_threshold_m,
+                    sensor_proximity_penalty=combo_sensor_proximity_penalty,
+                    max_plots=10,
+                    save_plots=save_visualization,  # Only generate plots if visualizing
+                    verbose=False,
+                )
 
-                    # Store combination result in info
-                    info['solver_info']['combination_result'] = combination_result
-                    info['solver_info']['optimal_combination'] = combination_result.get('best_combination', [])
-                    info['solver_info']['optimal_powers_dBm'] = combination_result.get('best_powers_dBm', np.array([]))
-                    info['solver_info']['combination_rmse'] = combination_result.get('best_rmse', np.inf)
-                    info['solver_info']['combination_bic'] = combination_result.get('best_bic', np.inf)
+                # Store combination result in info
+                info['solver_info']['combination_result'] = combination_result
+                info['solver_info']['optimal_combination'] = combination_result.get('best_combination', [])
+                info['solver_info']['optimal_powers_dBm'] = combination_result.get('best_powers_dBm', np.array([]))
+                info['solver_info']['combination_rmse'] = combination_result.get('best_rmse', np.inf)
+                info['solver_info']['combination_bic'] = combination_result.get('best_bic', np.inf)
 
-            # Now save GLRT visualization with filtered support info
+        # Save GLRT visualization if requested
+        if save_visualization and output_dir is not None:
             save_glrt_visualization(
                 info=info,
                 map_data=map_data,
@@ -908,7 +911,7 @@ def run_single_experiment(
                 save_iterations=save_iterations,
             )
 
-        
+
 
         # Extract estimated locations
         if 'solver_info' in info and 'support' in info['solver_info']:
@@ -1177,6 +1180,7 @@ def process_single_directory(args: Tuple) -> Tuple[List[Dict], str]:
                     for config_name, (whitening_method, feature_rho) in whitening_configs.items():
                         attempted += 1
                         try:
+                            # First pass: run WITHOUT visualizations to find best BIC
                             result = run_single_experiment(
                                 data_info=data_info,
                                 config=config,
@@ -1192,7 +1196,7 @@ def process_single_directory(args: Tuple) -> Tuple[List[Dict], str]:
                                 model_type=model_type,
                                 eta=eta,
                                 output_dir=output_dir,
-                                save_visualization=save_visualizations,
+                                save_visualization=False,  # Always False in first pass
                                 verbose=False,
                                 power_density_threshold=threshold,
 
@@ -1218,7 +1222,7 @@ def process_single_directory(args: Tuple) -> Tuple[List[Dict], str]:
                                 combo_sensor_proximity_penalty=combo_sensor_proximity_penalty,
                             )
 
-                            
+
                             if result is not None:
                                 result.update({
                                     'dir_name': dir_name,
@@ -1241,6 +1245,9 @@ def process_single_directory(args: Tuple) -> Tuple[List[Dict], str]:
                                     'robust_thresh': robust_threshold if use_robust_scoring else float('nan'),
                                     'pooling_lambda': pooling_lambda,
                                     'dedupe_dist': dedupe_distance_m,
+                                    # Store whitening params for potential re-run
+                                    '_whitening_method': whitening_method,
+                                    '_feature_rho': feature_rho,
                                 })
                                 results.append(result)
                             else:
@@ -1268,7 +1275,73 @@ def process_single_directory(args: Tuple) -> Tuple[List[Dict], str]:
     
     if failed > 0 and len(results) == 0:
         return results, f"all {attempted} experiments failed"
-    
+
+    # --- Re-run best BIC experiment with visualizations (if requested) ---
+    if not save_visualizations:
+        print(f"  [{dir_name}] Skipping visualizations (disabled)", flush=True)
+    elif len(results) == 0:
+        print(f"  [{dir_name}] Skipping visualizations (no results)", flush=True)
+    if save_visualizations and len(results) > 0:
+        # Find result with lowest combo_bic
+        valid_bic_results = [r for r in results if 'combo_bic' in r and not np.isnan(r.get('combo_bic', np.nan))]
+        if not valid_bic_results:
+            # Debug: check what BIC values we have
+            bic_values = [r.get('combo_bic', 'MISSING') for r in results[:3]]  # First 3
+            print(f"  [{dir_name}] Warning: No valid BIC results for visualization. Sample BIC values: {bic_values}", flush=True)
+        if valid_bic_results:
+            best_bic_result = min(valid_bic_results, key=lambda r: r['combo_bic'])
+            best_bic_strategy = best_bic_result['strategy']
+            best_bic_whitening = best_bic_result['whitening_config']
+            best_bic_sel_method = best_bic_result['selection_method']
+            best_bic_pf = best_bic_result['power_filtering']
+            best_bic_threshold = best_bic_result['power_threshold']
+            best_bic_sigma = best_bic_result['sigma_noise']
+            best_bic_whitening_method = best_bic_result.get('_whitening_method', 'none')
+            best_bic_feature_rho = best_bic_result.get('_feature_rho', None)
+
+            print(f"  [{dir_name}] Re-running best BIC experiment for visualizations: "
+                  f"{best_bic_strategy}, {best_bic_whitening}, BIC={best_bic_result['combo_bic']:.2f}", flush=True)
+
+            try:
+                # Re-run with save_visualization=True
+                _ = run_single_experiment(
+                    data_info=data_info,
+                    config=config,
+                    map_data=map_data,
+                    all_tx_locations=all_tx_locations,
+                    sigma_noise=best_bic_sigma,
+                    selection_method=best_bic_sel_method,
+                    use_power_filtering=best_bic_pf,
+                    whitening_method=best_bic_whitening_method,
+                    feature_rho=best_bic_feature_rho,
+                    whitening_config_name=best_bic_whitening,
+                    strategy_name=best_bic_strategy,
+                    model_type=model_type,
+                    eta=eta,
+                    output_dir=output_dir,
+                    save_visualization=True,  # NOW enable visualizations
+                    verbose=False,
+                    power_density_threshold=best_bic_threshold if best_bic_pf else 0.0,
+                    beam_width=beam_width,
+                    max_pool_size=max_pool_size,
+                    use_edf_penalty=use_edf_penalty,
+                    edf_threshold=edf_threshold,
+                    use_robust_scoring=use_robust_scoring,
+                    robust_threshold=robust_threshold,
+                    save_iterations=save_iterations,
+                    pooling_lambda=pooling_lambda,
+                    dedupe_distance_m=dedupe_distance_m,
+                    combo_min_distance_m=combo_min_distance_m,
+                    combo_max_size=combo_max_size,
+                    combo_max_candidates=combo_max_candidates,
+                    combo_bic_weight=combo_bic_weight,
+                    combo_max_power_diff_dB=combo_max_power_diff_dB,
+                    combo_sensor_proximity_threshold_m=combo_sensor_proximity_threshold_m,
+                    combo_sensor_proximity_penalty=combo_sensor_proximity_penalty,
+                )
+            except Exception as viz_exc:
+                print(f"  [{dir_name}] Warning: Failed to generate visualizations: {viz_exc}", flush=True)
+
     # --- Logging Results ---
     n_completed = len(results)
     best_ale = float('inf')
@@ -1614,12 +1687,375 @@ def generate_bic_analysis_report(bic_df: pd.DataFrame, output_dir: Path):
             ce_count = (bic_df['combo_count_error'] == ce).sum()
             report_lines.append(f"| {int(ce)} | {ce_count} | {ce_count/total*100:.1f}% |")
 
+    # Per-Directory Analysis
+    if 'dir_name' in bic_df.columns:
+        report_lines.append("")
+        report_lines.append("## Per-Directory Analysis")
+        report_lines.append("")
+
+        for dir_name in sorted(bic_df['dir_name'].unique()):
+            dir_subset = bic_df[bic_df['dir_name'] == dir_name]
+            report_lines.append(f"### {dir_name}")
+            report_lines.append("")
+
+            # Summary for this directory
+            dir_count = len(dir_subset)
+            dir_ale = dir_subset['combo_ale'].mean() if 'combo_ale' in dir_subset.columns else np.nan
+            dir_pd = dir_subset['combo_pd'].mean() if 'combo_pd' in dir_subset.columns else np.nan
+            dir_prec = dir_subset['combo_precision'].mean() if 'combo_precision' in dir_subset.columns else np.nan
+            dir_ce = dir_subset['combo_count_error'].mean() if 'combo_count_error' in dir_subset.columns else np.nan
+
+            report_lines.append(f"- **Experiments**: {dir_count}")
+            if not np.isnan(dir_ale):
+                report_lines.append(f"- **Mean ALE**: {dir_ale:.2f} m")
+            if not np.isnan(dir_pd):
+                report_lines.append(f"- **Mean Pd**: {dir_pd*100:.1f}%")
+            if not np.isnan(dir_prec):
+                report_lines.append(f"- **Mean Precision**: {dir_prec*100:.1f}%")
+            if not np.isnan(dir_ce):
+                report_lines.append(f"- **Mean Count Error**: {dir_ce:.2f}")
+
+            # TX count estimation for this directory
+            if 'tx_count' in dir_subset.columns and 'combo_n_tx' in dir_subset.columns:
+                perfect = (dir_subset['combo_count_error'] == 0).sum()
+                report_lines.append(f"- **Perfect Count Rate**: {perfect}/{dir_count} ({perfect/dir_count*100:.1f}%)")
+
+            report_lines.append("")
+
+            # Breakdown by TX count within this directory
+            if 'tx_count' in dir_subset.columns and len(dir_subset['tx_count'].unique()) > 1:
+                report_lines.append("| TX Count | Experiments | Mean ALE | Mean Pd | Mean Prec | Mean CE | Mean Est |")
+                report_lines.append("|----------|-------------|----------|---------|-----------|---------|----------|")
+
+                for tx_count in sorted(dir_subset['tx_count'].unique()):
+                    tx_subset = dir_subset[dir_subset['tx_count'] == tx_count]
+                    tx_count_n = len(tx_subset)
+                    tx_ale = tx_subset['combo_ale'].mean() if 'combo_ale' in tx_subset.columns else np.nan
+                    tx_pd = tx_subset['combo_pd'].mean() if 'combo_pd' in tx_subset.columns else np.nan
+                    tx_prec = tx_subset['combo_precision'].mean() if 'combo_precision' in tx_subset.columns else np.nan
+                    tx_ce = tx_subset['combo_count_error'].mean() if 'combo_count_error' in tx_subset.columns else np.nan
+                    tx_est = tx_subset['combo_n_tx'].mean() if 'combo_n_tx' in tx_subset.columns else np.nan
+
+                    ale_str = f"{tx_ale:.2f}" if not np.isnan(tx_ale) else "-"
+                    pd_str = f"{tx_pd*100:.1f}%" if not np.isnan(tx_pd) else "-"
+                    prec_str = f"{tx_prec*100:.1f}%" if not np.isnan(tx_prec) else "-"
+                    ce_str = f"{tx_ce:.2f}" if not np.isnan(tx_ce) else "-"
+                    est_str = f"{tx_est:.2f}" if not np.isnan(tx_est) else "-"
+
+                    report_lines.append(f"| {int(tx_count)} | {tx_count_n} | {ale_str} | {pd_str} | {prec_str} | {ce_str} | {est_str} |")
+
+                report_lines.append("")
+
+    # Per-Transmitter Set Analysis (by unique transmitters combination)
+    if 'transmitters' in bic_df.columns:
+        report_lines.append("")
+        report_lines.append("## Per-Transmitter Set Analysis")
+        report_lines.append("")
+        report_lines.append("| Transmitters | TX Count | Experiments | Mean ALE | Mean Pd | Mean Prec | Mean CE | Perfect Rate |")
+        report_lines.append("|--------------|----------|-------------|----------|---------|-----------|---------|--------------|")
+
+        for tx_set in sorted(bic_df['transmitters'].unique()):
+            tx_subset = bic_df[bic_df['transmitters'] == tx_set]
+            tx_count_val = tx_subset['tx_count'].iloc[0] if 'tx_count' in tx_subset.columns else 0
+            n_exp = len(tx_subset)
+            ale = tx_subset['combo_ale'].mean() if 'combo_ale' in tx_subset.columns else np.nan
+            pd_val = tx_subset['combo_pd'].mean() if 'combo_pd' in tx_subset.columns else np.nan
+            prec = tx_subset['combo_precision'].mean() if 'combo_precision' in tx_subset.columns else np.nan
+            ce = tx_subset['combo_count_error'].mean() if 'combo_count_error' in tx_subset.columns else np.nan
+            perfect = (tx_subset['combo_count_error'] == 0).sum() if 'combo_count_error' in tx_subset.columns else 0
+
+            ale_str = f"{ale:.2f}" if not np.isnan(ale) else "-"
+            pd_str = f"{pd_val*100:.1f}%" if not np.isnan(pd_val) else "-"
+            prec_str = f"{prec*100:.1f}%" if not np.isnan(prec) else "-"
+            ce_str = f"{ce:.2f}" if not np.isnan(ce) else "-"
+            perfect_str = f"{perfect}/{n_exp} ({perfect/n_exp*100:.0f}%)"
+
+            report_lines.append(f"| {tx_set} | {int(tx_count_val)} | {n_exp} | {ale_str} | {pd_str} | {prec_str} | {ce_str} | {perfect_str} |")
+
     # Save report
     report_path = output_dir / 'analysis_report_bic.md'
     with open(report_path, 'w') as f:
         f.write('\n'.join(report_lines))
 
     print(f"BIC analysis report saved to: {report_path}")
+
+
+def create_final_results(results_df: pd.DataFrame, output_dir: Path) -> pd.DataFrame:
+    """
+    Create final_results.csv by selecting the best strategy per directory based on lowest BIC.
+
+    For each unique (dir_name, transmitters, seed) combination, select the row with
+    the lowest combo_bic score.
+
+    Parameters
+    ----------
+    results_df : pd.DataFrame
+        Full results dataframe with all strategies
+    output_dir : Path
+        Output directory
+
+    Returns
+    -------
+    pd.DataFrame
+        Final results with one row per directory (best strategy selected by BIC)
+    """
+    if 'combo_bic' not in results_df.columns:
+        print("Warning: combo_bic column not found, cannot create final results")
+        return pd.DataFrame()
+
+    # Group by directory identifiers and select row with minimum BIC
+    group_cols = ['dir_name', 'transmitters', 'seed']
+    available_group_cols = [col for col in group_cols if col in results_df.columns]
+
+    if not available_group_cols:
+        print("Warning: No grouping columns found")
+        return pd.DataFrame()
+
+    # For each group, get the row with minimum combo_bic
+    idx = results_df.groupby(available_group_cols)['combo_bic'].idxmin()
+    final_df = results_df.loc[idx].copy()
+
+    # Select relevant columns for final results
+    final_columns = [
+        'dir_name', 'transmitters', 'seed', 'tx_count',
+        'strategy', 'whitening_config', 'sigma_noise',
+        'combo_n_tx', 'combo_ale', 'combo_pd', 'combo_precision',
+        'combo_count_error', 'combo_rmse', 'combo_bic',
+        # Also include GLRT metrics for reference
+        'ale', 'pd', 'precision', 'n_estimated',
+    ]
+
+    available_final_cols = [col for col in final_columns if col in final_df.columns]
+    final_df = final_df[available_final_cols]
+
+    # Sort by dir_name, transmitters, seed
+    sort_cols = [col for col in ['dir_name', 'transmitters', 'seed'] if col in final_df.columns]
+    if sort_cols:
+        final_df = final_df.sort_values(sort_cols)
+
+    # Save to CSV
+    csv_path = output_dir / 'final_results.csv'
+    final_df.to_csv(csv_path, index=False)
+
+    print(f"Final results saved to: {csv_path}")
+    print(f"  Total directories: {len(final_df)}")
+    print(f"  (Selected best strategy per directory based on lowest BIC)")
+
+    return final_df
+
+
+def generate_final_analysis_report(final_df: pd.DataFrame, output_dir: Path):
+    """
+    Generate analysis_report_final.md for the best-strategy-per-directory results.
+
+    Parameters
+    ----------
+    final_df : pd.DataFrame
+        Final results dataframe (one row per directory)
+    output_dir : Path
+        Output directory
+    """
+    report_lines = []
+    report_lines.append("# Final Results Analysis Report")
+    report_lines.append("")
+    report_lines.append("This report analyzes results after selecting the **best strategy per directory**")
+    report_lines.append("based on lowest BIC score.")
+    report_lines.append("")
+    report_lines.append(f"Generated: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    report_lines.append("")
+
+    # Overall Summary
+    report_lines.append("## Overall Summary")
+    report_lines.append("")
+    report_lines.append(f"- **Total directories**: {len(final_df)}")
+
+    if 'tx_count' in final_df.columns:
+        report_lines.append(f"- **TX count range**: {int(final_df['tx_count'].min())} - {int(final_df['tx_count'].max())}")
+
+    report_lines.append("")
+    report_lines.append("### Aggregate Metrics (Best Strategy per Directory)")
+    report_lines.append("")
+    report_lines.append("| Metric | Mean | Std | Min | Max |")
+    report_lines.append("|--------|------|-----|-----|-----|")
+
+    for col, name in [('combo_ale', 'ALE (m)'), ('combo_pd', 'Pd'), ('combo_precision', 'Precision'), ('combo_count_error', 'Count Error'), ('combo_bic', 'BIC')]:
+        if col in final_df.columns:
+            valid = final_df[col].dropna()
+            if len(valid) > 0:
+                if col in ['combo_pd', 'combo_precision']:
+                    report_lines.append(f"| {name} | {valid.mean()*100:.1f}% | {valid.std()*100:.1f}% | {valid.min()*100:.1f}% | {valid.max()*100:.1f}% |")
+                else:
+                    report_lines.append(f"| {name} | {valid.mean():.2f} | {valid.std():.2f} | {valid.min():.2f} | {valid.max():.2f} |")
+
+    # Strategy selection distribution
+    if 'strategy' in final_df.columns:
+        report_lines.append("")
+        report_lines.append("## Strategy Selection Distribution")
+        report_lines.append("")
+        report_lines.append("Which strategies were selected as best (by BIC) across directories:")
+        report_lines.append("")
+        report_lines.append("| Strategy | Times Selected | Percentage |")
+        report_lines.append("|----------|----------------|------------|")
+
+        strategy_counts = final_df['strategy'].value_counts()
+        total = len(final_df)
+        for strategy, count in strategy_counts.items():
+            report_lines.append(f"| {strategy} | {count} | {count/total*100:.1f}% |")
+
+    # Whitening config selection distribution
+    if 'whitening_config' in final_df.columns:
+        report_lines.append("")
+        report_lines.append("## Whitening Configuration Selection Distribution")
+        report_lines.append("")
+        report_lines.append("| Whitening Config | Times Selected | Percentage |")
+        report_lines.append("|------------------|----------------|------------|")
+
+        wc_counts = final_df['whitening_config'].value_counts()
+        for wc, count in wc_counts.items():
+            report_lines.append(f"| {wc} | {count} | {count/total*100:.1f}% |")
+
+    # Analysis by TX Count
+    if 'tx_count' in final_df.columns:
+        report_lines.append("")
+        report_lines.append("## Results by True TX Count")
+        report_lines.append("")
+        report_lines.append("| TX Count | Directories | Mean ALE | Mean Pd | Mean Precision | Mean Count Error | Mean Est. TXs |")
+        report_lines.append("|----------|-------------|----------|---------|----------------|------------------|---------------|")
+
+        for tx_count in sorted(final_df['tx_count'].unique()):
+            subset = final_df[final_df['tx_count'] == tx_count]
+            n_dirs = len(subset)
+            ale = subset['combo_ale'].mean() if 'combo_ale' in subset.columns else np.nan
+            pd_val = subset['combo_pd'].mean() if 'combo_pd' in subset.columns else np.nan
+            prec = subset['combo_precision'].mean() if 'combo_precision' in subset.columns else np.nan
+            ce = subset['combo_count_error'].mean() if 'combo_count_error' in subset.columns else np.nan
+            est_tx = subset['combo_n_tx'].mean() if 'combo_n_tx' in subset.columns else np.nan
+
+            ale_str = f"{ale:.2f}" if not np.isnan(ale) else "-"
+            pd_str = f"{pd_val*100:.1f}%" if not np.isnan(pd_val) else "-"
+            prec_str = f"{prec*100:.1f}%" if not np.isnan(prec) else "-"
+            ce_str = f"{ce:.2f}" if not np.isnan(ce) else "-"
+            est_str = f"{est_tx:.2f}" if not np.isnan(est_tx) else "-"
+
+            report_lines.append(f"| {int(tx_count)} | {n_dirs} | {ale_str} | {pd_str} | {prec_str} | {ce_str} | {est_str} |")
+
+    # TX Count Estimation Accuracy
+    if 'tx_count' in final_df.columns and 'combo_n_tx' in final_df.columns:
+        report_lines.append("")
+        report_lines.append("## TX Count Estimation Accuracy")
+        report_lines.append("")
+
+        total = len(final_df)
+        if 'combo_count_error' in final_df.columns:
+            perfect = (final_df['combo_count_error'] == 0).sum()
+            report_lines.append(f"- **Perfect count rate**: {perfect}/{total} ({perfect/total*100:.1f}%)")
+
+        under = (final_df['combo_n_tx'] < final_df['tx_count']).sum()
+        over = (final_df['combo_n_tx'] > final_df['tx_count']).sum()
+        exact = (final_df['combo_n_tx'] == final_df['tx_count']).sum()
+        report_lines.append(f"- **Under-estimation**: {under} ({under/total*100:.1f}%)")
+        report_lines.append(f"- **Exact**: {exact} ({exact/total*100:.1f}%)")
+        report_lines.append(f"- **Over-estimation**: {over} ({over/total*100:.1f}%)")
+
+    # Per-Directory Details
+    if 'dir_name' in final_df.columns:
+        report_lines.append("")
+        report_lines.append("## Per-Directory Results")
+        report_lines.append("")
+        report_lines.append("| Directory | TXs | Best Strategy | Whitening | Est TXs | ALE | Pd | Prec | BIC |")
+        report_lines.append("|-----------|-----|---------------|-----------|---------|-----|-----|------|-----|")
+
+        for _, row in final_df.iterrows():
+            dir_name = row.get('dir_name', '-')
+            tx_count = int(row['tx_count']) if 'tx_count' in row and not pd.isna(row['tx_count']) else '-'
+            strategy = row.get('strategy', '-')
+            whitening = row.get('whitening_config', '-')
+            est_tx = int(row['combo_n_tx']) if 'combo_n_tx' in row and not pd.isna(row['combo_n_tx']) else '-'
+            ale = f"{row['combo_ale']:.1f}" if 'combo_ale' in row and not pd.isna(row['combo_ale']) else '-'
+            pd_val = f"{row['combo_pd']*100:.0f}%" if 'combo_pd' in row and not pd.isna(row['combo_pd']) else '-'
+            prec = f"{row['combo_precision']*100:.0f}%" if 'combo_precision' in row and not pd.isna(row['combo_precision']) else '-'
+            bic = f"{row['combo_bic']:.1f}" if 'combo_bic' in row and not pd.isna(row['combo_bic']) else '-'
+
+            report_lines.append(f"| {dir_name} | {tx_count} | {strategy} | {whitening} | {est_tx} | {ale} | {pd_val} | {prec} | {bic} |")
+
+    # Save report
+    report_path = output_dir / 'analysis_report_final.md'
+    with open(report_path, 'w') as f:
+        f.write('\n'.join(report_lines))
+
+    print(f"Final analysis report saved to: {report_path}")
+
+
+def cleanup_visualizations_for_best_only(final_df: pd.DataFrame, output_dir: Path):
+    """
+    Remove visualization directories for non-best strategies, keeping only the best.
+
+    For each directory in final_df, we need to identify which experiment_name
+    corresponds to the best strategy and remove others.
+
+    Parameters
+    ----------
+    final_df : pd.DataFrame
+        Final results with best strategy per directory
+    output_dir : Path
+        Output directory containing glrt_visualizations/
+    """
+    vis_dir = output_dir / 'glrt_visualizations'
+    if not vis_dir.exists():
+        print("No visualization directory found, skipping cleanup")
+        return
+
+    # Build set of experiment names to keep (from final_df)
+    # experiment_name format: {tx_underscore}_{strategy}_{whitening}_{selection}_{pf}
+    # We need to reconstruct this from the final_df rows
+
+    keep_dirs = set()
+    for _, row in final_df.iterrows():
+        # Reconstruct experiment name components
+        transmitters = row.get('transmitters', '')
+        tx_underscore = transmitters.replace(',', '_') if transmitters else ''
+        strategy = row.get('strategy', '')
+        whitening = row.get('whitening_config', '')
+        # selection_method and power_filtering are also part of the name
+        # but they may vary - we need to check what's in the actual dir names
+
+        # The experiment name pattern is complex, let's match by prefix
+        if tx_underscore and strategy and whitening:
+            # Look for directories starting with this pattern
+            pattern_start = f"{tx_underscore}_{strategy}_{whitening}"
+            keep_dirs.add(pattern_start)
+
+    if not keep_dirs:
+        print("Could not determine directories to keep, skipping cleanup")
+        return
+
+    # List all visualization subdirectories
+    removed_count = 0
+    kept_count = 0
+
+    for subdir in vis_dir.iterdir():
+        if not subdir.is_dir():
+            continue
+
+        # Check if this directory matches any of the keep patterns
+        should_keep = False
+        for pattern in keep_dirs:
+            if subdir.name.startswith(pattern):
+                should_keep = True
+                break
+
+        if should_keep:
+            kept_count += 1
+        else:
+            # Remove this directory
+            import shutil
+            try:
+                shutil.rmtree(subdir)
+                removed_count += 1
+            except Exception as e:
+                print(f"Warning: Could not remove {subdir}: {e}")
+
+    print(f"Visualization cleanup: kept {kept_count} directories, removed {removed_count}")
 
 
 def run_comprehensive_sweep(
@@ -2639,8 +3075,8 @@ def main():
         help='Maximum number of top candidates to consider for combinations (default: 10)'
     )
     parser.add_argument(
-        '--combo-bic-weight', type=float, default=0.2,
-        help='BIC penalty weight for model complexity (default: 0.2)'
+        '--combo-bic-weight', type=float, default=0.05,
+        help='BIC penalty weight for model complexity (default: 0.05)'
     )
     parser.add_argument(
         '--combo-max-power-diff', type=float, default=20.0,
@@ -2812,6 +3248,14 @@ def main():
     bic_df = save_bic_results_csv(results_df, output_dir)
     if bic_df is not None and len(bic_df) > 0:
         generate_bic_analysis_report(bic_df, output_dir)
+
+    # Create final results (best strategy per directory based on lowest BIC)
+    print("\nCreating final results (best strategy per directory)...")
+    final_df = create_final_results(results_df, output_dir)
+    if final_df is not None and len(final_df) > 0:
+        generate_final_analysis_report(final_df, output_dir)
+        # Note: Visualization cleanup no longer needed - visualizations are only created
+        # for the best BIC strategy per directory during processing
 
     # Generate analysis
     print("\nGenerating analysis...")

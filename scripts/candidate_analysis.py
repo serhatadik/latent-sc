@@ -135,6 +135,7 @@ def filter_candidates_by_rmse(
     min_candidates: int = 1,
     rmse_threshold: float = 20.0,
     max_error_threshold: float = 30.0,
+    save_plot: bool = True,
 ) -> Tuple[List[int], np.ndarray, float]:
     """
     Filter candidates based on RMSE, Max Error, and Slope.
@@ -275,9 +276,9 @@ def filter_candidates_by_rmse(
     
     filtered_support = [sorted_support[i] for i in final_indices_sorted]
     filtered_rmse = sorted_rmse[final_indices_sorted]
-    
-    # Generate visualization
-    if output_dir is not None and experiment_name is not None:
+
+    # Generate visualization only if save_plot is True
+    if save_plot and output_dir is not None and experiment_name is not None:
         vis_dir = output_dir / 'glrt_visualizations' / experiment_name
         vis_dir.mkdir(parents=True, exist_ok=True)
         
@@ -778,20 +779,22 @@ def optimize_tx_powers_for_combination(
 def compute_bic(
     n_sensors: int,
     n_tx: int,
+    rmse: float,
     max_error: float,
     bic_penalty_weight: float = 0.2,
 ) -> float:
     """
     Compute Bayesian Information Criterion (BIC) for model selection.
 
-    Uses max error as the primary metric instead of RMSE to penalize
-    combinations that have large outlier errors.
+    Uses both RMSE and max error to balance average fit quality with
+    worst-case outlier performance.
 
-    BIC = n * log(max_error^2) + k * log(n) * weight
+    BIC = n * log(rmse^2 + max_error^2) + k * log(n) * weight
 
     where:
         n = number of observations (sensors)
         k = number of parameters (TX powers)
+        rmse = root mean squared error in dB
         max_error = maximum absolute error in dB
 
     Parameters
@@ -800,21 +803,23 @@ def compute_bic(
         Number of sensor observations
     n_tx : int
         Number of transmitters in the model
+    rmse : float
+        Root mean squared error in dB
     max_error : float
         Maximum absolute error in dB
     bic_penalty_weight : float
-        Weight for the complexity penalty (default 2.0 for standard BIC)
+        Weight for the complexity penalty (default 0.05)
 
     Returns
     -------
     bic : float
         BIC score (lower is better)
     """
-    # Use max_error^2 as the error metric
-    error_sq = max(max_error ** 2, 1e-20)
+    # Combine RMSE and max_error: use sum of squares
+    combined_error_sq = max(rmse ** 2 + max_error ** 2, 1e-20)
 
-    # BIC = n * log(error^2) + k * log(n) * weight
-    bic = n_sensors * np.log(error_sq) + bic_penalty_weight * n_tx * np.log(n_sensors)
+    # BIC = n * log(combined_error^2) + k * log(n) * weight
+    bic = n_sensors * np.log(combined_error_sq) + bic_penalty_weight * n_tx * np.log(n_sensors)
 
     return bic
 
@@ -966,8 +971,8 @@ def find_optimal_tx_combination(
                 combo, path_gains, observed_powers_dB, max_power_diff_dB
             )
 
-            # Compute BIC (using max_error as the primary metric)
-            bic = compute_bic(n_sensors, size, max_error, bic_penalty_weight)
+            # Compute BIC (using both RMSE and max_error)
+            bic = compute_bic(n_sensors, size, rmse, max_error, bic_penalty_weight)
 
             # Apply sensor proximity penalty
             n_near_sensor = sum(1 for idx in combo if candidate_near_sensor[idx])
@@ -1540,6 +1545,7 @@ def run_combinatorial_selection(
     sensor_proximity_threshold_m: float = 100.0,
     sensor_proximity_penalty: float = 10.0,
     max_plots: int = 10,
+    save_plots: bool = True,
     verbose: bool = False,
 ) -> Dict:
     """
@@ -1625,40 +1631,42 @@ def run_combinatorial_selection(
         verbose=verbose,
     )
 
-    # Generate combination power analysis plots
-    save_combination_power_analysis(
-        combination_result=combination_result,
-        candidate_indices=filtered_support,
-        map_shape=map_data['shape'],
-        sensor_locations=sensor_locations,
-        observed_powers_dB=observed_powers_dB,
-        tx_locations=tx_locations,
-        output_dir=output_dir,
-        experiment_name=experiment_name,
-        scale=scale,
-        np_exponent=np_exponent,
-        max_plots=max_plots,
-    )
+    # Generate plots only if save_plots is True
+    if save_plots and output_dir is not None:
+        # Generate combination power analysis plots
+        save_combination_power_analysis(
+            combination_result=combination_result,
+            candidate_indices=filtered_support,
+            map_shape=map_data['shape'],
+            sensor_locations=sensor_locations,
+            observed_powers_dB=observed_powers_dB,
+            tx_locations=tx_locations,
+            output_dir=output_dir,
+            experiment_name=experiment_name,
+            scale=scale,
+            np_exponent=np_exponent,
+            max_plots=max_plots,
+        )
 
-    # Generate RMSE/BIC comparison plot for combinations
-    save_combination_comparison_plot(
-        combination_result=combination_result,
-        candidate_indices=filtered_support,
-        output_dir=output_dir,
-        experiment_name=experiment_name,
-    )
+        # Generate RMSE/BIC comparison plot for combinations
+        save_combination_comparison_plot(
+            combination_result=combination_result,
+            candidate_indices=filtered_support,
+            output_dir=output_dir,
+            experiment_name=experiment_name,
+        )
 
-    # Generate final selection plot with combination
-    save_final_selection_with_combinations(
-        info=info,
-        combination_result=combination_result,
-        map_data=map_data,
-        sensor_locations=sensor_locations,
-        observed_powers_dB=observed_powers_dB,
-        tx_locations=tx_locations,
-        output_dir=output_dir,
-        experiment_name=experiment_name,
-        scale=scale,
-    )
+        # Generate final selection plot with combination
+        save_final_selection_with_combinations(
+            info=info,
+            combination_result=combination_result,
+            map_data=map_data,
+            sensor_locations=sensor_locations,
+            observed_powers_dB=observed_powers_dB,
+            tx_locations=tx_locations,
+            output_dir=output_dir,
+            experiment_name=experiment_name,
+            scale=scale,
+        )
 
     return combination_result
