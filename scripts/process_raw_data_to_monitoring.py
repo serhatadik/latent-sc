@@ -450,9 +450,11 @@ Available transmitters: ebc, ustar, guesthouse, mario, moran, wasatch
     else:
         transmitter_id = "_".join(transmitter_names)
 
-    # Append random seed to identifier if provided
+    # Append num_locations and random seed to identifier
+    # Format: {transmitters}_nloc{N}_seed_{S} or {transmitters}_nloc{N} (no seed)
+    transmitter_id = f"{transmitter_id}_nloc{args.num_locations}"
     if args.random_seed is not None:
-        transmitter_id = f"{transmitter_id}_seed{args.random_seed}"
+        transmitter_id = f"{transmitter_id}_seed_{args.random_seed}"
 
     # Set default output paths if not specified
     if args.output_yaml is None:

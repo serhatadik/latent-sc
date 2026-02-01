@@ -203,88 +203,98 @@ def check_tirem_cache_exists(
     return features_cached, prop_cached
 
 
-def parse_directory_name(dir_name: str) -> Tuple[List[str], Optional[int]]:
+def parse_directory_name(dir_name: str) -> Tuple[List[str], Optional[int], Optional[int]]:
     """
-    Parse a data directory name to extract transmitter names and seed.
-    
+    Parse a data directory name to extract transmitter names, num_locations, and seed.
+
     Examples:
-        'mario_moran_seed_32' -> (['mario', 'moran'], 32)
-        'guesthouse_wasatch_ustar_seed_5' -> (['guesthouse', 'wasatch', 'ustar'], 5)
-        'mario' -> (['mario'], None)
-        'validation_mario' -> ([], None)  # Skip validation directories
-    
+        'mario_moran_nloc10_seed_32' -> (['mario', 'moran'], 10, 32)
+        'guesthouse_wasatch_ustar_nloc10_seed_5' -> (['guesthouse', 'wasatch', 'ustar'], 10, 5)
+        'mario_nloc10' -> (['mario'], 10, None)
+        'mario_moran_seed_32' -> (['mario', 'moran'], None, 32)  # Legacy format (no nloc)
+        'mario' -> (['mario'], None, None)
+        'validation_mario' -> ([], None, None)  # Skip validation directories
+
     Parameters
     ----------
     dir_name : str
         Directory name to parse
-        
+
     Returns
     -------
     tuple
-        (list of transmitter names, seed value or None)
+        (list of transmitter names, num_locations or None, seed value or None)
     """
     # Skip validation directories
     if dir_name.startswith('validation_'):
-        return [], None
-    
+        return [], None, None
+
     # Check for seed pattern
     seed_match = re.search(r'_seed_(\d+)$', dir_name)
     seed = int(seed_match.group(1)) if seed_match else None
-    
+
     # Remove seed suffix if present
     name_part = re.sub(r'_seed_\d+$', '', dir_name)
-    
+
+    # Check for nloc pattern
+    nloc_match = re.search(r'_nloc(\d+)$', name_part)
+    num_locations = int(nloc_match.group(1)) if nloc_match else None
+
+    # Remove nloc suffix if present
+    name_part = re.sub(r'_nloc\d+$', '', name_part)
+
     # Split by underscore and filter for known transmitters
     parts = name_part.split('_')
     transmitters = [p for p in parts if p in KNOWN_TRANSMITTERS]
-    
-    return transmitters, seed
+
+    return transmitters, num_locations, seed
 
 
 def discover_data_directories(base_dir: Path) -> Dict[int, List[Dict]]:
     """
     Discover all valid data directories and group by TX count.
-    
+
     Parameters
     ----------
     base_dir : Path
         Base directory to scan (data/processed/)
-        
+
     Returns
     -------
     dict
         Dictionary mapping TX count -> list of directory info dicts
-        Each info dict contains: 'path', 'transmitters', 'seed', 'name'
+        Each info dict contains: 'path', 'transmitters', 'num_locations', 'seed', 'name'
     """
     grouped = defaultdict(list)
-    
+
     for item in base_dir.iterdir():
         if not item.is_dir():
             continue
-            
-        transmitters, seed = parse_directory_name(item.name)
-        
+
+        transmitters, num_locations, seed = parse_directory_name(item.name)
+
         # Skip empty or invalid directories
         if not transmitters:
             continue
-            
+
         tx_count = len(transmitters)
-        
+
         # Only include TX counts 1-5
         if tx_count < 1 or tx_count > 5:
             continue
-            
+
         grouped[tx_count].append({
             'path': item,
             'transmitters': transmitters,
+            'num_locations': num_locations,
             'seed': seed,
             'name': item.name,
         })
-    
+
     # Sort each group by directory name for reproducibility
     for tx_count in grouped:
         grouped[tx_count].sort(key=lambda x: x['name'])
-    
+
     return dict(grouped)
 
 
@@ -711,12 +721,16 @@ def run_single_experiment(
         tx_underscore = "_".join(transmitters)
         data_dir = data_info['path']
         seed = data_info['seed']
-        
-        # Build config path
+        num_locations = data_info.get('num_locations')
+
+        # Build config path (matching the directory naming convention)
+        # Format: {transmitters}_nloc{N}_seed_{S} or legacy format without nloc
+        config_id = tx_underscore
+        if num_locations is not None:
+            config_id = f"{config_id}_nloc{num_locations}"
         if seed is not None:
-            config_path = f'config/monitoring_locations_{tx_underscore}_seed_{seed}.yaml'
-        else:
-            config_path = f'config/monitoring_locations_{tx_underscore}.yaml'
+            config_id = f"{config_id}_seed_{seed}"
+        config_path = f'config/monitoring_locations_{config_id}.yaml'
         
         # Check if config exists
         if not Path(config_path).exists():
@@ -838,7 +852,7 @@ def run_single_experiment(
                     experiment_name=experiment_name,
                     min_candidates=1,
                     rmse_threshold=20.0,
-                    max_error_threshold=30.0,
+                    max_error_threshold=38.0,
                     save_plot=save_visualization,  # Only save plot if visualizing
                 )
 
@@ -1136,10 +1150,14 @@ def process_single_directory(args: Tuple) -> Tuple[List[Dict], str]:
     # Check if TIREM cache exists (for tirem model)
     if model_type == 'tirem':
         seed = data_info['seed']
+        num_locations = data_info.get('num_locations')
+        # Build config path (matching the directory naming convention)
+        config_id = tx_underscore
+        if num_locations is not None:
+            config_id = f"{config_id}_nloc{num_locations}"
         if seed is not None:
-            config_path = f'config/monitoring_locations_{tx_underscore}_seed_{seed}.yaml'
-        else:
-            config_path = f'config/monitoring_locations_{tx_underscore}.yaml'
+            config_id = f"{config_id}_seed_{seed}"
+        config_path = f'config/monitoring_locations_{config_id}.yaml'
         
         if not Path(config_path).exists():
             return results, "no config file"
