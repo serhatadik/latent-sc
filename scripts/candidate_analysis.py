@@ -134,7 +134,7 @@ def filter_candidates_by_rmse(
     experiment_name: Optional[str] = None,
     min_candidates: int = 1,
     rmse_threshold: float = 20.0,
-    max_error_threshold: float = 30.0,
+    max_error_threshold: float = 38.0,
     save_plot: bool = True,
 ) -> Tuple[List[int], np.ndarray, float]:
     """
@@ -142,7 +142,7 @@ def filter_candidates_by_rmse(
     
     Conditions to keep:
     1. RMSE <= rmse_threshold
-    2. Max Error <= max_error_threshold (default 30 dB)
+    2. Max Error <= max_error_threshold (default 38 dB)
     3. Slope <= 0 (negative slope implies physical path loss)
     
     Parameters
