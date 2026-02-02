@@ -35,13 +35,14 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
                                  cluster_max_candidates=100,
                                  dedupe_distance_m=60.0,
                                  use_power_filtering=False, power_density_sigma_m=200.0, power_density_threshold=0.3,
-                                 max_tx_power_dbm=40.0, veto_margin_db=5.0, 
+                                 max_tx_power_dbm=40.0, veto_margin_db=5.0,
                                  veto_threshold=1e-9, ceiling_penalty_weight=0.1,
                                  use_edf_penalty=False, edf_threshold=1.5,
                                  use_robust_scoring=False, robust_threshold=6.0,
                                  verbose=True,
                                  beam_width=1, pool_refinement=True, max_pool_size=50,
                                  input_is_linear=False, solve_in_linear_domain=None,
+                                 observed_stds_dB=None, sigma_noise_floor=1e-15,
                                  **solver_kwargs):
     """
     Perform joint sparse reconstruction to estimate transmit power field.
@@ -97,10 +98,22 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
     # Handle diagonal whitening methods based on observations
     if whitening_method in ['hetero_diag', 'log_inv_power_diag']:
         W = compute_whitening_matrix(
-            method=whitening_method, 
+            method=whitening_method,
             observed_powers=observed_powers_linear,
-            sigma_noise=sigma_noise, 
+            sigma_noise=sigma_noise,
             eta=eta,
+            verbose=verbose
+        )
+    elif whitening_method == 'hetero_diag_obs':
+        if observed_stds_dB is None:
+            raise ValueError("observed_stds_dB required for 'hetero_diag_obs' whitening method")
+        if verbose:
+            print(f"  Using observed std whitening (hetero_diag_obs)...")
+        W = compute_whitening_matrix(
+            method='hetero_diag_obs',
+            observed_powers=observed_powers_linear,
+            observed_stds_dB=observed_stds_dB,
+            sigma_noise_floor=sigma_noise_floor,
             verbose=verbose
         )
     elif whitening_method == 'hetero_spatial':

@@ -24,7 +24,8 @@ import warnings
 
 def compute_whitening_matrix(cov_matrix=None, method='cholesky', regularization=1e-10,
                               verbose=True, observed_powers=None,
-                              sigma_noise=1e-13, eta=0.5):
+                              sigma_noise=1e-13, eta=0.5,
+                              observed_stds_dB=None, sigma_noise_floor=1e-15):
     """
     Compute whitening matrix W = V^(-1/2) from covariance matrix.
 
@@ -33,24 +34,29 @@ def compute_whitening_matrix(cov_matrix=None, method='cholesky', regularization=
     cov_matrix : ndarray of shape (M, M), optional
         Covariance matrix (must be symmetric positive definite).
         Required for 'cholesky', 'svd', and 'eig' methods.
-    method : {'cholesky', 'svd', 'eig', 'log_inv_power_diag', 'hetero_diag'}, optional
+    method : {'cholesky', 'svd', 'eig', 'log_inv_power_diag', 'hetero_diag', 'hetero_diag_obs'}, optional
         Method for computing matrix square root, default: 'cholesky'
         - 'cholesky': Fast, requires positive definite matrix
         - 'svd': More robust, handles near-singular matrices
         - 'eig': Eigenvalue decomposition, middle ground
         - 'log_inv_power_diag': Diagonal matrix based on observed powers (W_jj = -log10(p_j))
         - 'hetero_diag': Heteroscedastic diagonal matrix V_kk = sigma_noise^2 + eta^2 * p_k^2
+        - 'hetero_diag_obs': Heteroscedastic diagonal using observed std (from data files)
     regularization : float, optional
         Small value added to diagonal for numerical stability, default: 1e-10
     verbose : bool, optional
         Print diagnostic information, default: True
     observed_powers : ndarray of shape (M,), optional
-        Observed sensor powers (linear scale, mW). Required for method='log_inv_power_diag' and 'hetero_diag'.
+        Observed sensor powers (linear scale, mW). Required for method='log_inv_power_diag', 'hetero_diag', and 'hetero_diag_obs'.
         When provided for 'log_inv_power_diag', diagonal whitening matrix W_jj = log10(1 / observed_powers_j) is computed.
     sigma_noise : float, optional
         Noise floor variance for 'hetero_diag' method. Default 1e-13.
     eta : float, optional
         Scaling factor for signal-dependent variance in 'hetero_diag'. Default 0.5.
+    observed_stds_dB : ndarray of shape (M,), optional
+        Observed standard deviations in dB (from data files). Required for method='hetero_diag_obs'.
+    sigma_noise_floor : float, optional
+        Minimum variance floor to avoid numerical issues. Default 1e-15.
 
     Returns
     -------
@@ -138,8 +144,14 @@ def compute_whitening_matrix(cov_matrix=None, method='cholesky', regularization=
         if observed_powers is None:
             raise ValueError("observed_powers must be provided for method='hetero_diag'")
         W = _whitening_hetero_diag(observed_powers, M, sigma_noise, eta, verbose)
+    elif method == 'hetero_diag_obs':
+        if observed_powers is None:
+            raise ValueError("observed_powers must be provided for method='hetero_diag_obs'")
+        if observed_stds_dB is None:
+            raise ValueError("observed_stds_dB must be provided for method='hetero_diag_obs'")
+        W = _whitening_hetero_diag_obs(observed_powers, observed_stds_dB, M, sigma_noise_floor, verbose)
     else:
-        raise ValueError(f"Unknown method: {method}. Choose 'cholesky', 'svd', 'eig', 'log_inv_power_diag', or 'hetero_diag'")
+        raise ValueError(f"Unknown method: {method}. Choose 'cholesky', 'svd', 'eig', 'log_inv_power_diag', 'hetero_diag', or 'hetero_diag_obs'")
 
     # Validate result (only if cov_matrix was used/provided)
     if verbose and cov_matrix is not None and method not in ['log_inv_power_diag', 'hetero_diag']:
@@ -193,6 +205,55 @@ def _whitening_hetero_diag(observed_powers, M, sigma_noise=1e-13, eta=0.5, verbo
         print(f"    V_diag range: [{v_diag.min():.2e}, {v_diag.max():.2e}]")
         print(f"    W_diag range: [{w_diag.min():.2e}, {w_diag.max():.2e}]")
     
+    return W
+
+
+def _whitening_hetero_diag_obs(observed_powers, observed_stds_dB, M,
+                                sigma_noise_floor=1e-15, verbose=True):
+    """
+    Heteroscedastic diagonal whitening using observed standard deviations.
+
+    Converts dB std to linear via Delta Method:
+        sigma_lin = (ln(10)/10) * P_lin * sigma_dB ≈ 0.2303 * P_lin * sigma_dB
+        V_kk = sigma_lin^2
+        W_kk = 1 / sqrt(V_kk)
+
+    Parameters
+    ----------
+    observed_powers : ndarray of shape (M,)
+        Observed powers in linear scale (mW)
+    observed_stds_dB : ndarray of shape (M,)
+        Observed standard deviations in dB (from data files)
+    M : int
+        Number of sensors
+    sigma_noise_floor : float
+        Minimum variance floor to avoid numerical issues
+    verbose : bool
+        Print info
+
+    Returns
+    -------
+    W : ndarray of shape (M, M)
+        Whitening matrix
+    """
+    LN10_OVER_10 = np.log(10) / 10  # ≈ 0.2303
+
+    # Convert dB std to linear std via Delta Method
+    sigma_lin = LN10_OVER_10 * observed_powers * observed_stds_dB
+
+    # Diagonal variance with floor for numerical stability
+    v_diag = np.maximum(sigma_lin**2, sigma_noise_floor**2)
+
+    # W = V^(-1/2) is diagonal with elements 1/sqrt(v_diag)
+    w_diag = 1.0 / np.sqrt(v_diag)
+    W = np.diag(w_diag)
+
+    if verbose:
+        print(f"  Heteroscedastic diagonal whitening (observed std):")
+        print(f"    sigma_dB range: [{observed_stds_dB.min():.2f}, {observed_stds_dB.max():.2f}] dB")
+        print(f"    sigma_lin range: [{sigma_lin.min():.2e}, {sigma_lin.max():.2e}]")
+        print(f"    V_diag range: [{v_diag.min():.2e}, {v_diag.max():.2e}]")
+
     return W
 
 

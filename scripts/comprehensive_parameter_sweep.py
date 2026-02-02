@@ -755,7 +755,11 @@ def run_single_experiment(
             
         observed_powers_dB = np.load(powers_file)
         observed_powers_linear = dbm_to_linear(observed_powers_dB)
-        
+
+        # Load observed standard deviations (for hetero_diag_obs whitening)
+        stds_file = data_dir / f"{tx_underscore}_std_powers.npy"
+        observed_stds_dB = np.load(stds_file) if stds_file.exists() else None
+
         # Get true transmitter locations
         tx_locations = {name: all_tx_locations[name] for name in transmitters if name in all_tx_locations}
         true_locs_pixels = np.array([tx['coordinates'] for tx in tx_locations.values()])
@@ -807,8 +811,10 @@ def run_single_experiment(
             'edf_threshold': edf_threshold,
             'use_robust_scoring': use_robust_scoring,
             'robust_threshold': robust_threshold,
+            # Observed std for hetero_diag_obs whitening (None for other methods)
+            'observed_stds_dB': observed_stds_dB,
         }
-        
+
         # Add feature_rho only for hetero_geo_aware
         if feature_rho is not None:
             reconstruction_kwargs['feature_rho'] = feature_rho
