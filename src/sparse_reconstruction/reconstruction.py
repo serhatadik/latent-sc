@@ -259,7 +259,8 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
     if verbose:
         info['A_model'] = A_model
         info['W'] = W
-        info['cov_matrix'] = cov_matrix
+        if 'V' in locals():
+            info['cov_matrix'] = V
 
     return transmit_power_map, info
 
