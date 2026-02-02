@@ -17,6 +17,7 @@ Usage:
     python scripts/comprehensive_parameter_sweep.py
     python scripts/comprehensive_parameter_sweep.py --test  # Quick test mode
     python scripts/comprehensive_parameter_sweep.py --tx-counts 1,2,3  # Specific TX counts
+    python scripts/comprehensive_parameter_sweep.py --nloc 30  # Only nloc30 directories
 """
 
 # IMPORTANT: Set threading env vars BEFORE importing numpy to prevent deadlocks
@@ -1174,9 +1175,11 @@ def process_single_directory(args: Tuple) -> Tuple[List[Dict], str]:
             scale=config['spatial']['proxel_size'],
             tirem_config_path='config/tirem_parameters.yaml',
         )
-        
-        if not features_cached or not prop_cached:
-            return results, f"no TIREM cache (features={features_cached}, prop={prop_cached})"
+
+        # Only require features cache if hetero_geo_aware whitening is being used
+        needs_features = 'hetero_geo_aware' in whitening_configs
+        if not prop_cached or (needs_features and not features_cached):
+            return results, f"no TIREM cache (features={features_cached}, prop={prop_cached}, needs_features={needs_features})"
     
     # Define strategies based on this dataset's observations
     strategies = define_sigma_noise_strategies(observed_powers_linear, test_mode=test_mode)
@@ -2084,6 +2087,7 @@ def run_comprehensive_sweep(
     output_dir: Path,
     test_mode: bool = False,
     tx_counts_filter: Optional[List[int]] = None,
+    nloc_filter: Optional[int] = None,
     max_dirs_per_count: Optional[int] = None,
     model_type: str = 'tirem',
     eta: float = 0.01,
@@ -2160,7 +2164,16 @@ def run_comprehensive_sweep(
     # Filter TX counts if specified
     if tx_counts_filter:
         grouped_dirs = {k: v for k, v in grouped_dirs.items() if k in tx_counts_filter}
-    
+
+    # Filter by nloc if specified
+    if nloc_filter is not None:
+        grouped_dirs = {
+            k: [d for d in v if d.get('num_locations') == nloc_filter]
+            for k, v in grouped_dirs.items()
+        }
+        # Remove empty groups
+        grouped_dirs = {k: v for k, v in grouped_dirs.items() if v}
+
     # Flatten directories list with TX count info
     all_dirs = []
     for tx_count in sorted(grouped_dirs.keys()):
@@ -2180,6 +2193,8 @@ def run_comprehensive_sweep(
     print("COMPREHENSIVE PARAMETER SWEEP")
     print(f"{'='*70}")
     print(f"TX counts to process: {sorted(grouped_dirs.keys())}")
+    if nloc_filter is not None:
+        print(f"nloc filter: {nloc_filter}")
     print(f"Total directories: {total_dirs}")
     print(f"Workers: {n_workers}")
     print(f"Test mode: {test_mode}")
@@ -2211,6 +2226,7 @@ def run_comprehensive_sweep(
         data_info_serializable = {
             'name': data_info['name'],
             'transmitters': data_info['transmitters'],
+            'num_locations': data_info.get('num_locations'),
             'seed': data_info['seed'],
             'path_str': str(data_info['path']),  # Convert Path to string
         }
@@ -3010,6 +3026,10 @@ def main():
         help='Comma-separated list of TX counts to process (e.g., 1,2,3). Default: all'
     )
     parser.add_argument(
+        '--nloc', type=int, default=None,
+        help='Only process directories with this specific num_locations value (e.g., 30 for nloc30)'
+    )
+    parser.add_argument(
         '--max-dirs', type=int, default=None,
         help='Maximum directories to process per TX count (for testing)'
     )
@@ -3198,6 +3218,7 @@ def main():
         output_dir=output_dir,
         test_mode=args.test,
         tx_counts_filter=tx_counts_filter,
+        nloc_filter=args.nloc,
         max_dirs_per_count=max_dirs,
         model_type=args.model_type,
         eta=args.eta,
