@@ -66,6 +66,10 @@ from src.sparse_reconstruction import (
 
 # Import evaluation metrics
 from src.evaluation.metrics import compute_localization_metrics
+from src.evaluation.reconstruction_validation import (
+    compute_reconstruction_error,
+    check_validation_data_exists,
+)
 
 # Import candidate analysis functions
 from scripts.candidate_analysis import (
@@ -85,6 +89,7 @@ KNOWN_TRANSMITTERS = ['guesthouse', 'mario', 'moran', 'ustar', 'wasatch']
 # Smaller rho = feature differences decorrelate sensor errors faster
 AVAILABLE_WHITENING_CONFIGS = {
     'hetero_diag': ('hetero_diag', None),  # Diagonal heteroscedastic (baseline, no geometry)
+    'hetero_diag_obs': ('hetero_diag_obs', None),  # Diagonal using observed std from data files
     'hetero_geo_aware': ('hetero_geo_aware', [0.5, 10.0, 1e6, 150.0]),  # Geometry-aware with physics-based rho
     'hetero_spatial': ('hetero_spatial', None), # Heteroscedastic + Spatial Correlation (Exp Decay)
 }
@@ -102,6 +107,8 @@ DESIRED_COLUMN_ORDER = [
     # Combination metrics
     'combo_n_tx', 'combo_ale', 'combo_tp', 'combo_fp', 'combo_fn', 'combo_pd', 'combo_precision',
     'combo_count_error', 'combo_rmse', 'combo_bic',
+    # Reconstruction error metrics
+    'recon_rmse', 'recon_mae', 'recon_bias', 'recon_max_error', 'recon_n_val_points', 'recon_noise_floor', 'recon_status',
 ]
 
 # Cache directory for TIREM
@@ -1050,7 +1057,28 @@ def run_single_experiment(
         # Convert history to JSON string for CSV storage
         import json
         glrt_score_history_str = json.dumps([round(s, 6) for s in glrt_score_history])
-        
+
+        # === RECONSTRUCTION ERROR COMPUTATION ===
+        # Compute how well the estimated TX locations/powers predict RSS at validation points
+        # Pass observation data for noise floor computation (clamping predictions)
+        recon_metrics = compute_reconstruction_error(
+            combo_indices=info.get('solver_info', {}).get('optimal_combination', []),
+            combo_powers_dBm=[float(p) for p in info.get('solver_info', {}).get('optimal_powers_dBm', [])],
+            map_data=map_data,
+            transmitters=transmitters,
+            project_root=Path(__file__).parent.parent,
+            observed_powers_dB=observed_powers_dB,
+            num_locations=num_locations,
+            model_type=model_type,
+            model_config_path=model_config_path,
+            scale=config['spatial']['proxel_size'],
+            auto_generate=False,  # Don't auto-generate during sweep
+            verbose=False,
+            output_dir=output_dir,
+            experiment_name=experiment_name,
+            save_plot=save_visualization,  # Generate validation plot when visualizations enabled
+        )
+
         return {
             'ale': metrics['ale'],
             'tp': metrics['tp'],
@@ -1089,6 +1117,14 @@ def run_single_experiment(
             'combo_pd': combo_metrics['combo_pd'],
             'combo_precision': combo_metrics['combo_precision'],
             'combo_count_error': abs(len(info.get('solver_info', {}).get('optimal_combination', [])) - len(true_locs_pixels)),
+            # Reconstruction error metrics
+            'recon_rmse': recon_metrics['recon_rmse'],
+            'recon_mae': recon_metrics['recon_mae'],
+            'recon_bias': recon_metrics['recon_bias'],
+            'recon_max_error': recon_metrics['recon_max_error'],
+            'recon_n_val_points': recon_metrics['recon_n_val_points'],
+            'recon_noise_floor': recon_metrics['recon_noise_floor'],
+            'recon_status': recon_metrics['recon_status'],
         }
 
     except Exception as e:
@@ -1798,6 +1834,56 @@ def generate_bic_analysis_report(bic_df: pd.DataFrame, output_dir: Path):
             perfect_str = f"{perfect}/{n_exp} ({perfect/n_exp*100:.0f}%)"
 
             report_lines.append(f"| {tx_set} | {int(tx_count_val)} | {n_exp} | {ale_str} | {pd_str} | {prec_str} | {ce_str} | {perfect_str} |")
+
+    # === Reconstruction Error Analysis ===
+    if 'recon_rmse' in bic_df.columns:
+        report_lines.append("")
+        report_lines.append("## Reconstruction Error Analysis")
+        report_lines.append("")
+
+        valid_recon = bic_df[bic_df['recon_status'] == 'success']
+        report_lines.append(f"- **Experiments with validation data**: {len(valid_recon)}/{len(bic_df)}")
+
+        if len(valid_recon) > 0:
+            report_lines.append(f"- **Mean Reconstruction RMSE**: {valid_recon['recon_rmse'].mean():.2f} dB")
+            report_lines.append(f"- **Mean Reconstruction MAE**: {valid_recon['recon_mae'].mean():.2f} dB")
+            report_lines.append(f"- **Mean Reconstruction Bias**: {valid_recon['recon_bias'].mean():.2f} dB")
+            report_lines.append(f"- **Mean Max Error**: {valid_recon['recon_max_error'].mean():.2f} dB")
+            report_lines.append(f"- **Mean Validation Points**: {valid_recon['recon_n_val_points'].mean():.0f}")
+
+            # Breakdown by status
+            report_lines.append("")
+            report_lines.append("### Reconstruction Status Breakdown")
+            report_lines.append("")
+            report_lines.append("| Status | Count | Percentage |")
+            report_lines.append("|--------|-------|------------|")
+            for status in bic_df['recon_status'].unique():
+                count = (bic_df['recon_status'] == status).sum()
+                pct = count / len(bic_df) * 100
+                report_lines.append(f"| {status} | {count} | {pct:.1f}% |")
+
+            # Reconstruction error by TX count
+            if 'tx_count' in valid_recon.columns and len(valid_recon) > 0:
+                report_lines.append("")
+                report_lines.append("### Reconstruction Error by TX Count")
+                report_lines.append("")
+                report_lines.append("| TX Count | Experiments | Mean RMSE | Mean MAE | Mean Bias | Mean Max Error |")
+                report_lines.append("|----------|-------------|-----------|----------|-----------|----------------|")
+
+                for tx_count in sorted(valid_recon['tx_count'].unique()):
+                    subset = valid_recon[valid_recon['tx_count'] == tx_count]
+                    n_exp = len(subset)
+                    rmse = subset['recon_rmse'].mean()
+                    mae = subset['recon_mae'].mean()
+                    bias = subset['recon_bias'].mean()
+                    max_err = subset['recon_max_error'].mean()
+
+                    rmse_str = f"{rmse:.2f}" if not np.isnan(rmse) else "-"
+                    mae_str = f"{mae:.2f}" if not np.isnan(mae) else "-"
+                    bias_str = f"{bias:.2f}" if not np.isnan(bias) else "-"
+                    max_str = f"{max_err:.2f}" if not np.isnan(max_err) else "-"
+
+                    report_lines.append(f"| {int(tx_count)} | {n_exp} | {rmse_str} | {mae_str} | {bias_str} | {max_str} |")
 
     # Save report
     report_path = output_dir / 'analysis_report_bic.md'
