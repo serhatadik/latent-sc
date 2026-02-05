@@ -693,6 +693,7 @@ def run_single_experiment(
     power_density_threshold: float = 0.3,
     strategy_name: str = '',
     model_type: str = 'tirem',
+    recon_model_type: str = 'tirem',
     eta: float = 0.01,
     output_dir: Optional[Path] = None,
     save_visualization: bool = False,
@@ -775,14 +776,21 @@ def run_single_experiment(
         
         start_time = time.time()
         
-        # Determine model config path
+        # Determine model config paths (localization and reconstruction)
         if model_type == 'tirem':
             model_config_path = 'config/tirem_parameters.yaml'
         elif model_type == 'raytracing':
             model_config_path = 'config/sionna_parameters.yaml'
         else:
             model_config_path = None
-        
+
+        if recon_model_type == 'tirem':
+            recon_model_config_path = 'config/tirem_parameters.yaml'
+        elif recon_model_type == 'raytracing':
+            recon_model_config_path = 'config/sionna_parameters.yaml'
+        else:
+            recon_model_config_path = None
+
         # Run reconstruction
         reconstruction_kwargs = {
             'sensor_locations': sensor_locations,
@@ -927,31 +935,50 @@ def run_single_experiment(
                 info['solver_info']['combination_rmse'] = combination_result.get('best_rmse', np.inf)
                 info['solver_info']['combination_bic'] = combination_result.get('best_bic', np.inf)
 
-                # Step 5: Recompute optimal TX powers using the localization
-                # propagation model (e.g. TIREM) instead of the log-distance
-                # approximation used during candidate selection.  The TX
-                # locations are kept fixed; only powers are re-optimized so
-                # that reconstruction uses power estimates consistent with
-                # the actual propagation model.
-                A_model = info.get('A_model')
+                # Step 5: Recompute optimal TX powers using the reconstruction
+                # propagation model instead of the log-distance approximation
+                # used during candidate selection.  The TX locations are kept
+                # fixed; only powers are re-optimized so that reconstruction
+                # uses power estimates consistent with the reconstruction
+                # propagation model.
                 optimal_combo = info['solver_info']['optimal_combination']
-                if A_model is not None and len(optimal_combo) > 0:
-                    recomp_powers, recomp_rmse, recomp_mae, recomp_max_err, recomp_total = \
-                        recompute_powers_with_propagation_model(
-                            combo_grid_indices=optimal_combo,
-                            A_model=A_model,
-                            observed_powers_dB=observed_powers_dB,
-                            max_power_diff_dB=combo_max_power_diff_dB,
+                if len(optimal_combo) > 0:
+                    # Get the propagation matrix for reconstruction
+                    if recon_model_type == model_type:
+                        # Same model — reuse A_model from localization
+                        A_recon = info.get('A_model')
+                    else:
+                        # Different model — compute propagation matrix
+                        # for reconstruction model with sensor locations
+                        from src.sparse_reconstruction.propagation_matrix import compute_propagation_matrix as _compute_prop_matrix
+                        A_recon = _compute_prop_matrix(
+                            sensor_locations=sensor_locations,
+                            map_shape=map_data['shape'],
+                            scale=scale,
+                            model_type=recon_model_type,
+                            config_path=recon_model_config_path,
+                            np_exponent=np_exponent,
+                            n_jobs=-1,
+                            verbose=False,
                         )
-                    info['solver_info']['optimal_powers_dBm'] = recomp_powers
-                    info['solver_info']['combination_rmse'] = recomp_rmse
 
-                # Step 5.5: Per-TX exponent refit (log_distance only)
+                    if A_recon is not None:
+                        recomp_powers, recomp_rmse, recomp_mae, recomp_max_err, recomp_total = \
+                            recompute_powers_with_propagation_model(
+                                combo_grid_indices=optimal_combo,
+                                A_model=A_recon,
+                                observed_powers_dB=observed_powers_dB,
+                                max_power_diff_dB=combo_max_power_diff_dB,
+                            )
+                        info['solver_info']['optimal_powers_dBm'] = recomp_powers
+                        info['solver_info']['combination_rmse'] = recomp_rmse
+
+                # Step 5.5: Per-TX exponent refit (log_distance reconstruction only)
                 # After localization, fit a per-TX path loss exponent from
                 # observed sensor data, rebuild path gains, and re-optimize
                 # powers.  This improves reconstruction when different TXs
                 # experience different propagation conditions.
-                if model_type == 'log_distance' and len(optimal_combo) > 0:
+                if recon_model_type == 'log_distance' and len(optimal_combo) > 0:
                     per_tx_exp, _refit_gains, refit_powers, refit_rmse, \
                         refit_mae, refit_max_err, refit_total = \
                         refit_with_per_tx_exponents(
@@ -1112,8 +1139,8 @@ def run_single_experiment(
             project_root=Path(__file__).parent.parent,
             observed_powers_dB=observed_powers_dB,
             num_locations=num_locations,
-            model_type=model_type,
-            model_config_path=model_config_path,
+            model_type=recon_model_type,
+            model_config_path=recon_model_config_path,
             scale=config['spatial']['proxel_size'],
             auto_generate=False,  # Don't auto-generate during sweep
             verbose=False,
@@ -1200,17 +1227,17 @@ def process_single_directory(args: Tuple) -> Tuple[List[Dict], str]:
     ----------
     args : tuple
         (data_info_serializable, config, map_data, all_tx_locations, output_dir_str,
-         test_mode, model_type, eta, save_visualizations, whitening_configs,
-         selection_methods, power_thresholds, beam_width, max_pool_size,
-         use_edf_penalty, edf_threshold)
-    
+         test_mode, model_type, recon_model_type, eta, save_visualizations,
+         whitening_configs, selection_methods, power_thresholds, beam_width,
+         max_pool_size, use_edf_penalty, edf_threshold, ...)
+
     Returns
     -------
     tuple
         (list of result dictionaries, skip_reason or None)
     """
     (data_info_serializable, config, map_data, all_tx_locations, output_dir_str,
-     test_mode, model_type, eta, save_visualizations, whitening_configs,
+     test_mode, model_type, recon_model_type, eta, save_visualizations, whitening_configs,
      selection_configs, power_thresholds, beam_width, max_pool_size,
      use_edf_penalty, edf_threshold, use_robust_scoring, robust_threshold, save_iterations,
      pooling_lambda, dedupe_distance_m,
@@ -1236,8 +1263,8 @@ def process_single_directory(args: Tuple) -> Tuple[List[Dict], str]:
     observed_powers_dB = np.load(powers_file)
     observed_powers_linear = dbm_to_linear(observed_powers_dB)
     
-    # Check if TIREM cache exists (for tirem model)
-    if model_type == 'tirem':
+    # Check if TIREM cache exists (needed if either model uses TIREM)
+    if model_type == 'tirem' or recon_model_type == 'tirem':
         seed = data_info['seed']
         num_locations = data_info.get('num_locations')
         # Build config path (matching the directory naming convention)
@@ -1247,16 +1274,16 @@ def process_single_directory(args: Tuple) -> Tuple[List[Dict], str]:
         if seed is not None:
             config_id = f"{config_id}_seed_{seed}"
         config_path = f'config/monitoring_locations_{config_id}.yaml'
-        
+
         if not Path(config_path).exists():
             return results, "no config file"
-        
+
         locations_config = load_monitoring_locations(
             config_path=config_path,
             map_data=map_data
         )
         sensor_locations = get_sensor_locations_array(locations_config)
-        
+
         features_cached, prop_cached = check_tirem_cache_exists(
             sensor_locations=sensor_locations,
             map_shape=map_data['shape'],
@@ -1264,8 +1291,8 @@ def process_single_directory(args: Tuple) -> Tuple[List[Dict], str]:
             tirem_config_path='config/tirem_parameters.yaml',
         )
 
-        # Only require features cache if hetero_geo_aware whitening is being used
-        needs_features = 'hetero_geo_aware' in whitening_configs
+        # Features cache only needed for localization with hetero_geo_aware whitening
+        needs_features = ('hetero_geo_aware' in whitening_configs) and (model_type == 'tirem')
         if not prop_cached or (needs_features and not features_cached):
             return results, f"no TIREM cache (features={features_cached}, prop={prop_cached}, needs_features={needs_features})"
     
@@ -1303,6 +1330,7 @@ def process_single_directory(args: Tuple) -> Tuple[List[Dict], str]:
                                 whitening_config_name=config_name,
                                 strategy_name=strategy_name,
                                 model_type=model_type,
+                                recon_model_type=recon_model_type,
                                 eta=eta,
                                 output_dir=output_dir,
                                 save_visualization=False,  # Always False in first pass
@@ -1475,6 +1503,7 @@ def process_single_directory(args: Tuple) -> Tuple[List[Dict], str]:
                     whitening_config_name=best_bic_whitening,
                     strategy_name=best_bic_strategy,
                     model_type=model_type,
+                    recon_model_type=recon_model_type,
                     eta=eta,
                     output_dir=output_dir,
                     save_visualization=True,  # NOW enable visualizations
@@ -2226,6 +2255,7 @@ def run_comprehensive_sweep(
     nloc_filter: Optional[int] = None,
     max_dirs_per_count: Optional[int] = None,
     model_type: str = 'tirem',
+    recon_model_type: str = 'tirem',
     eta: float = 0.01,
     save_visualizations: bool = True,
     verbose: bool = True,
@@ -2334,7 +2364,8 @@ def run_comprehensive_sweep(
     print(f"Total directories: {total_dirs}")
     print(f"Workers: {n_workers}")
     print(f"Test mode: {test_mode}")
-    print(f"Model type: {model_type}")
+    print(f"Localization model: {model_type}")
+    print(f"Reconstruction model: {recon_model_type}")
     print(f"Whitening configs: {list(whitening_configs.keys())}")
     print(f"EDF Penalty: {use_edf_penalty} (Threshold: {edf_threshold})")
     print(f"Robust Scoring: {use_robust_scoring} (Threshold: {robust_threshold})")
@@ -2374,6 +2405,7 @@ def run_comprehensive_sweep(
             output_dir_str,
             test_mode,
             model_type,
+            recon_model_type,
             eta,
             save_visualizations,
             whitening_configs,
@@ -3176,7 +3208,17 @@ def main():
     parser.add_argument(
         '--model-type', type=str, default='tirem',
         choices=['tirem', 'log_distance', 'raytracing'],
-        help='Propagation model (default: tirem)'
+        help='Default propagation model for both localization and reconstruction (default: tirem)'
+    )
+    parser.add_argument(
+        '--localization-model', type=str, default=None,
+        choices=['tirem', 'log_distance', 'raytracing'],
+        help='Propagation model for localization/GLRT (overrides --model-type)'
+    )
+    parser.add_argument(
+        '--reconstruction-model', type=str, default=None,
+        choices=['tirem', 'log_distance', 'raytracing'],
+        help='Propagation model for power recomputation & reconstruction validation (overrides --model-type)'
     )
     parser.add_argument(
         '--eta', type=float, default=0.1,
@@ -3266,7 +3308,11 @@ def main():
     )
 
     args = parser.parse_args()
-    
+
+    # Resolve model types: specific flags override --model-type
+    localization_model = args.localization_model or args.model_type
+    reconstruction_model = args.reconstruction_model or args.model_type
+
     # Parse thresholds list
     if args.power_thresholds:
         power_thresholds = [float(x) for x in args.power_thresholds.split(',')]
@@ -3356,7 +3402,8 @@ def main():
         tx_counts_filter=tx_counts_filter,
         nloc_filter=args.nloc,
         max_dirs_per_count=max_dirs,
-        model_type=args.model_type,
+        model_type=localization_model,
+        recon_model_type=reconstruction_model,
         eta=args.eta,
         save_visualizations=not args.no_visualizations,
         verbose=True,
