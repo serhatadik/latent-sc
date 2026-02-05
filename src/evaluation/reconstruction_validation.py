@@ -147,8 +147,8 @@ def save_validation_power_analysis_plot(
     """
     Generate validation power analysis plot.
 
-    Creates a plot showing observed vs predicted validation power as a function
-    of average distance to all estimated transmitters.
+    Creates a plot with subplots for each estimated transmitter, showing observed
+    vs predicted validation power as a function of distance to that TX.
 
     Parameters
     ----------
@@ -193,99 +193,257 @@ def save_validation_power_analysis_plot(
         tx_coords.append([tx_col, tx_row])
     tx_coords = np.array(tx_coords)
 
-    # Compute average distance from each validation point to all TXs
-    avg_distances = np.zeros(n_val)
-    for j, val_loc in enumerate(val_points):
-        # val_loc is [col, row]
-        distances_to_txs = []
-        for tx_coord in tx_coords:
+    # Compute distance from each validation point to each TX individually
+    # distances_to_tx[i, j] = distance from validation point j to TX i
+    distances_to_tx = np.zeros((n_tx, n_val))
+    for i, tx_coord in enumerate(tx_coords):
+        for j, val_loc in enumerate(val_points):
             dist_pixels = np.sqrt((val_loc[0] - tx_coord[0])**2 + (val_loc[1] - tx_coord[1])**2)
-            dist_m = max(dist_pixels * scale, 1.0)
-            distances_to_txs.append(dist_m)
-        avg_distances[j] = np.mean(distances_to_txs)
+            distances_to_tx[i, j] = max(dist_pixels * scale, 1.0)
 
-    # Compute error for coloring
-    power_errors = predicted_val_powers_dBm - observed_val_powers_dBm
+    # Determine subplot layout
+    if n_tx == 1:
+        n_rows, n_cols = 1, 1
+        fig_width, fig_height = 10, 7
+    elif n_tx == 2:
+        n_rows, n_cols = 1, 2
+        fig_width, fig_height = 16, 6
+    elif n_tx <= 4:
+        n_rows, n_cols = 2, 2
+        fig_width, fig_height = 14, 10
+    elif n_tx <= 6:
+        n_rows, n_cols = 2, 3
+        fig_width, fig_height = 18, 10
+    else:
+        n_cols = 3
+        n_rows = (n_tx + n_cols - 1) // n_cols
+        fig_width, fig_height = 18, 5 * n_rows
 
-    # Create the plot
-    fig, ax = plt.subplots(figsize=(12, 8))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(fig_width, fig_height))
+    if n_tx == 1:
+        axes = np.array([axes])
+    axes = axes.flatten()
 
-    # Use log scale for X axis
-    ax.set_xscale('log')
+    # Marker size and transparency - larger and more visible
+    marker_size = max(8, min(25, 400 / np.sqrt(n_val)))
+    scatter_alpha = max(0.4, min(0.7, 150 / n_val))
 
-    # For many points, use smaller markers and transparency
-    marker_size = max(5, min(30, 500 / np.sqrt(n_val)))
-    alpha = max(0.3, min(0.8, 100 / n_val))
-
-    # Sort by distance for cleaner visualization
-    sort_idx = np.argsort(avg_distances)
-
-    # Plot observed validation powers
-    ax.scatter(avg_distances[sort_idx], observed_val_powers_dBm[sort_idx],
-               s=marker_size, c='blue', marker='o', alpha=alpha,
-               edgecolor='none', label=f'Observed Validation ({n_val} pts)')
-
-    # Plot predicted validation powers
-    ax.scatter(avg_distances[sort_idx], predicted_val_powers_dBm[sort_idx],
-               s=marker_size, c='red', marker='^', alpha=alpha,
-               edgecolor='none', label='Predicted (clamped)')
-
-    # Fit and plot trend lines using binned averages for cleaner visualization
-    n_bins = min(20, n_val // 10)
-    if n_bins >= 3:
-        # Create log-spaced bins
-        log_dist = np.log10(avg_distances)
-        bin_edges = np.linspace(log_dist.min(), log_dist.max(), n_bins + 1)
-        bin_centers = []
-        obs_bin_means = []
-        pred_bin_means = []
-
-        for i in range(n_bins):
-            mask = (log_dist >= bin_edges[i]) & (log_dist < bin_edges[i + 1])
-            if np.sum(mask) > 0:
-                bin_centers.append(10 ** ((bin_edges[i] + bin_edges[i + 1]) / 2))
-                obs_bin_means.append(np.mean(observed_val_powers_dBm[mask]))
-                pred_bin_means.append(np.mean(predicted_val_powers_dBm[mask]))
-
-        if len(bin_centers) >= 2:
-            bin_centers = np.array(bin_centers)
-            obs_bin_means = np.array(obs_bin_means)
-            pred_bin_means = np.array(pred_bin_means)
-
-            # Plot binned trend lines
-            ax.plot(bin_centers, obs_bin_means, 'b-', linewidth=2.5, alpha=0.9,
-                    label='Observed Trend (binned avg)', zorder=5)
-            ax.plot(bin_centers, pred_bin_means, 'r-', linewidth=2.5, alpha=0.9,
-                    label='Predicted Trend (binned avg)', zorder=5)
-
-    # Draw noise floor line if available
-    if noise_floor is not None:
-        ax.axhline(y=noise_floor, color='gray', linestyle='--', linewidth=1.5,
-                   alpha=0.7, label=f'Noise Floor ({noise_floor:.1f} dBm)')
-
-    # Formatting
-    ax.set_xlabel('Average Distance to All Estimated TXs (m) [Log Scale]', fontsize=13)
-    ax.set_ylabel('Received Power (dBm)', fontsize=13)
-
-    # Build title with TX info and metrics
-    tx_info_parts = [f"TX{i+1}:{combo_powers_dBm[i]:.0f}dBm" for i in range(n_tx)]
-    tx_info_str = ", ".join(tx_info_parts)
-
-    title = f"Validation Power Analysis ({n_tx} TX)\n"
-    title += f"TX Powers: {tx_info_str}\n"
-    title += f"RMSE: {metrics['rmse']:.1f} dB | MAE: {metrics['mae']:.1f} dB | Bias: {metrics['bias']:.1f} dB"
-    ax.set_title(title, fontsize=11)
-
-    ax.legend(loc='upper right', fontsize=9)
-    ax.grid(True, alpha=0.3, which='both')
-
-    # Set reasonable y-axis limits
+    # Shared y-axis limits
     y_min = min(observed_val_powers_dBm.min(), predicted_val_powers_dBm.min()) - 5
     y_max = max(observed_val_powers_dBm.max(), predicted_val_powers_dBm.max()) + 5
-    ax.set_ylim(y_min, y_max)
+
+    n_bins = min(20, n_val // 10)
+
+    for i in range(n_tx):
+        ax = axes[i]
+        distances = distances_to_tx[i, :]
+        tx_power = combo_powers_dBm[i]
+
+        # Use log scale for X axis
+        ax.set_xscale('log')
+
+        # Sort by distance for this TX
+        sort_idx = np.argsort(distances)
+
+        # Plot observed validation powers (blue circles)
+        ax.scatter(distances[sort_idx], observed_val_powers_dBm[sort_idx],
+                   s=marker_size, c='blue', marker='o', alpha=scatter_alpha,
+                   edgecolor='none', label=f'Observed ({n_val} pts)')
+
+        # Plot predicted validation powers (red triangles)
+        ax.scatter(distances[sort_idx], predicted_val_powers_dBm[sort_idx],
+                   s=marker_size, c='red', marker='^', alpha=scatter_alpha,
+                   edgecolor='none', label='Predicted')
+
+        # Compute and plot binned trend lines
+        if n_bins >= 3:
+            log_dist = np.log10(distances)
+            bin_edges = np.linspace(log_dist.min(), log_dist.max(), n_bins + 1)
+            bin_centers = []
+            obs_bin_means = []
+            pred_bin_means = []
+
+            for b in range(n_bins):
+                mask = (log_dist >= bin_edges[b]) & (log_dist < bin_edges[b + 1])
+                if np.sum(mask) >= 3:  # Require at least 3 points per bin
+                    bin_centers.append(10 ** ((bin_edges[b] + bin_edges[b + 1]) / 2))
+                    obs_bin_means.append(np.mean(observed_val_powers_dBm[mask]))
+                    pred_bin_means.append(np.mean(predicted_val_powers_dBm[mask]))
+
+            if len(bin_centers) >= 2:
+                bin_centers = np.array(bin_centers)
+                obs_bin_means = np.array(obs_bin_means)
+                pred_bin_means = np.array(pred_bin_means)
+
+                # Plot observed trend line (solid blue)
+                ax.plot(bin_centers, obs_bin_means, 'b-', linewidth=2.5,
+                        alpha=0.9, label='Obs. Trend', zorder=5)
+
+                # Plot predicted trend line (solid red)
+                ax.plot(bin_centers, pred_bin_means, 'r-', linewidth=2.5,
+                        alpha=0.9, label='Pred. Trend', zorder=5)
+
+        # Draw noise floor line if available
+        if noise_floor is not None:
+            ax.axhline(y=noise_floor, color='gray', linestyle='--', linewidth=1.5,
+                       alpha=0.7, label=f'Noise Floor ({noise_floor:.1f})')
+
+        # Formatting for this subplot
+        ax.set_xlabel('Distance to TX (m)', fontsize=11)
+        ax.set_ylabel('Power (dBm)', fontsize=11)
+        ax.set_title(f'TX{i+1}: {tx_power:.0f} dBm', fontsize=12, fontweight='bold')
+        ax.legend(loc='upper right', fontsize=8)
+        ax.grid(True, alpha=0.3, which='both')
+        ax.set_ylim(y_min, y_max)
+
+    # Hide unused subplots
+    for i in range(n_tx, len(axes)):
+        axes[i].set_visible(False)
+
+    # Overall title
+    suptitle = f"Validation Power Analysis ({n_val} validation points)\n"
+    suptitle += f"RMSE: {metrics['rmse']:.1f} dB | MAE: {metrics['mae']:.1f} dB | Bias: {metrics['bias']:.1f} dB"
+    fig.suptitle(suptitle, fontsize=13, y=1.02)
+
+    plt.tight_layout()
 
     # Save figure
     fig_path = vis_dir / "validation_power_analysis.png"
+    plt.savefig(fig_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+
+
+def save_validation_spatial_plot(
+    combo_indices: List[int],
+    combo_powers_dBm: List[float],
+    val_points: np.ndarray,
+    observed_val_powers_dBm: np.ndarray,
+    map_shape: Tuple[int, int],
+    scale: float,
+    true_tx_locations: Optional[Dict] = None,
+    metrics: Optional[Dict] = None,
+    output_dir: Optional[Path] = None,
+    experiment_name: Optional[str] = None,
+) -> None:
+    """
+    Generate spatial plot showing validation measurements with power levels,
+    true TX locations, and estimated TX locations.
+
+    Parameters
+    ----------
+    combo_indices : list of int
+        Grid indices of estimated TX locations
+    combo_powers_dBm : list of float
+        Estimated TX powers in dBm
+    val_points : ndarray
+        Validation point locations in pixel coordinates, shape (N, 2) as [col, row]
+    observed_val_powers_dBm : ndarray
+        Observed validation powers in dBm
+    map_shape : tuple
+        (height, width) of the map
+    scale : float
+        Pixel-to-meter scaling factor
+    true_tx_locations : dict, optional
+        Dictionary of true TX locations {name: {'coordinates': [col, row]}}
+    metrics : dict, optional
+        Computed metrics (rmse, mae, bias, etc.)
+    output_dir : Path, optional
+        Directory to save figure
+    experiment_name : str, optional
+        Name for this experiment
+    """
+    if len(val_points) == 0:
+        return
+
+    if output_dir is None or experiment_name is None:
+        return
+
+    vis_dir = output_dir / 'glrt_visualizations' / experiment_name
+    vis_dir.mkdir(parents=True, exist_ok=True)
+
+    height, width = map_shape
+    n_val = len(val_points)
+    n_tx = len(combo_indices)
+
+    # Create figure
+    fig, ax = plt.subplots(figsize=(12, 10))
+
+    # Plot validation points with power levels as color
+    # val_points is [col, row] format
+    val_cols = val_points[:, 0]
+    val_rows = val_points[:, 1]
+
+    # Scatter plot of validation points colored by observed power
+    scatter = ax.scatter(val_cols, val_rows, c=observed_val_powers_dBm,
+                         cmap='viridis', s=15, alpha=0.7, edgecolor='none',
+                         label=f'Validation ({n_val} pts)')
+
+    # Add colorbar
+    cbar = plt.colorbar(scatter, ax=ax, shrink=0.8, pad=0.02)
+    cbar.set_label('Observed Power (dBm)', fontsize=11)
+
+    # Plot estimated TX locations
+    if n_tx > 0:
+        est_tx_cols = []
+        est_tx_rows = []
+        for idx in combo_indices:
+            tx_row = idx // width
+            tx_col = idx % width
+            est_tx_cols.append(tx_col)
+            est_tx_rows.append(tx_row)
+
+        ax.scatter(est_tx_cols, est_tx_rows, c='red', s=300, marker='*',
+                   edgecolor='black', linewidth=1.5, zorder=10,
+                   label=f'Estimated TX ({n_tx})')
+
+        # Add power labels next to estimated TXs
+        for i, (col, row) in enumerate(zip(est_tx_cols, est_tx_rows)):
+            ax.annotate(f'{combo_powers_dBm[i]:.0f}dBm',
+                        (col, row), xytext=(8, 8), textcoords='offset points',
+                        fontsize=9, fontweight='bold', color='red',
+                        bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.7))
+
+    # Plot true TX locations
+    if true_tx_locations is not None and len(true_tx_locations) > 0:
+        true_cols = []
+        true_rows = []
+        true_names = []
+        for name, loc in true_tx_locations.items():
+            coords = loc['coordinates']
+            true_cols.append(coords[0])
+            true_rows.append(coords[1])
+            true_names.append(name)
+
+        ax.scatter(true_cols, true_rows, c='lime', s=400, marker='X',
+                   edgecolor='black', linewidth=2, zorder=9,
+                   label=f'True TX ({len(true_tx_locations)})')
+
+        # Add name labels next to true TXs
+        for name, col, row in zip(true_names, true_cols, true_rows):
+            ax.annotate(name, (col, row), xytext=(-8, -15), textcoords='offset points',
+                        fontsize=9, fontweight='bold', color='darkgreen',
+                        bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.7))
+
+    # Set axis limits to map bounds
+    ax.set_xlim(0, width)
+    ax.set_ylim(0, height)  # Y axis not inverted to match other spatial plots
+
+    # Formatting
+    ax.set_xlabel(f'Column (pixel) [{scale:.1f} m/pixel]', fontsize=11)
+    ax.set_ylabel(f'Row (pixel) [{scale:.1f} m/pixel]', fontsize=11)
+
+    # Build title
+    title = "Validation Measurements Spatial Distribution\n"
+    if metrics is not None:
+        title += f"RMSE: {metrics['rmse']:.1f} dB | MAE: {metrics['mae']:.1f} dB | Bias: {metrics['bias']:.1f} dB"
+    ax.set_title(title, fontsize=12)
+
+    ax.legend(loc='upper right', fontsize=10)
+    ax.set_aspect('equal')
+    ax.grid(True, alpha=0.2)
+
+    # Save figure
+    fig_path = vis_dir / "validation_spatial_map.png"
     plt.savefig(fig_path, dpi=150, bbox_inches='tight')
     plt.close(fig)
 
@@ -307,6 +465,7 @@ def compute_reconstruction_error(
     output_dir: Optional[Path] = None,
     experiment_name: Optional[str] = None,
     save_plot: bool = False,
+    true_tx_locations: Optional[Dict] = None,
 ) -> Dict:
     """
     Compute reconstruction error metrics for a given TX estimate.
@@ -344,7 +503,10 @@ def compute_reconstruction_error(
     experiment_name : str, optional
         Name for the experiment (required if save_plot=True)
     save_plot : bool
-        If True, save validation power analysis plot
+        If True, save validation power analysis and spatial plots
+    true_tx_locations : dict, optional
+        Dictionary of true TX locations {name: {'coordinates': [col, row]}}
+        Used for spatial plot visualization
 
     Returns
     -------
@@ -464,8 +626,9 @@ def compute_reconstruction_error(
         error_metrics['recon_noise_floor'] = noise_floor if noise_floor is not None else np.nan
         error_metrics['recon_status'] = 'success'
 
-        # Generate validation power analysis plot if requested
+        # Generate validation plots if requested
         if save_plot and output_dir is not None and experiment_name is not None:
+            # Power analysis plot (subplots per TX)
             try:
                 save_validation_power_analysis_plot(
                     combo_indices=combo_indices,
@@ -482,7 +645,25 @@ def compute_reconstruction_error(
                 )
             except Exception as plot_err:
                 if verbose:
-                    print(f"  Failed to save validation plot: {plot_err}")
+                    print(f"  Failed to save validation power plot: {plot_err}")
+
+            # Spatial map plot
+            try:
+                save_validation_spatial_plot(
+                    combo_indices=combo_indices,
+                    combo_powers_dBm=combo_powers_dBm,
+                    val_points=validator.val_points,
+                    observed_val_powers_dBm=validator.observed_powers_dBm,
+                    map_shape=map_data['shape'],
+                    scale=scale,
+                    true_tx_locations=true_tx_locations,
+                    metrics=metrics,
+                    output_dir=output_dir,
+                    experiment_name=experiment_name,
+                )
+            except Exception as plot_err:
+                if verbose:
+                    print(f"  Failed to save validation spatial plot: {plot_err}")
 
     except Exception as e:
         if verbose:
