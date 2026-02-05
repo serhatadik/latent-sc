@@ -32,7 +32,7 @@ def compute_candidate_power_rmse(
     """
     Compute RMSE between predicted and observed power for each candidate transmitter.
     Uses bias-correction to find optimal TX power for each candidate.
-    
+
     Parameters
     ----------
     final_support : list
@@ -49,7 +49,7 @@ def compute_candidate_power_rmse(
         Pixel-to-meter scaling factor
     np_exponent : float
         Path loss exponent
-        
+
     Returns
     -------
     rmse_values : ndarray
@@ -66,54 +66,54 @@ def compute_candidate_power_rmse(
     height, width = map_shape
     n_candidates = len(final_support)
     n_sensors = len(sensor_locations)
-    
+
     rmse_values = np.zeros(n_candidates)
     mae_values = np.zeros(n_candidates)
     max_error_values = np.zeros(n_candidates)
     optimal_tx_powers = np.zeros(n_candidates)
     slope_values = np.zeros(n_candidates)
-    
+
     for idx, grid_idx in enumerate(final_support):
         # Convert grid index to (row, col)
         tx_row = grid_idx // width
         tx_col = grid_idx % width
-        
+
         # Calculate path gains for 0 dBm TX power
         predicted_powers_0dBm = np.zeros(n_sensors)
         distances_m = np.zeros(n_sensors)
-        
+
         for j, sensor_loc in enumerate(sensor_locations):
             dist_pixels = np.sqrt((sensor_loc[0] - tx_col)**2 + (sensor_loc[1] - tx_row)**2)
             dist_m = max(dist_pixels * scale, 1.0)
             distances_m[j] = dist_m
-            
+
             path_gain_linear = compute_linear_path_gain(
                 dist_m, np_exponent=np_exponent, di0=1.0, pi0=0.0
             )
-            
+
             # P_rx_dBm = P_tx_dBm + G_dB
             # Here P_tx_dBm = 0, so P_rx_dBm = linear_to_dbm(path_gain)
             predicted_powers_0dBm[j] = linear_to_dbm(path_gain_linear)
-            
+
         # Compute mean bias
         # Bias = Mean(Predicted - Observed)
         # We want Bias = 0, so Mean(Pred_0 + Optimal_Tx - Obs) = 0
         # Optimal_Tx = Mean(Obs) - Mean(Pred_0)
-        
+
         mean_obs = np.mean(observed_powers_dB)
         mean_pred_0 = np.mean(predicted_powers_0dBm)
         optimal_tx_dbm = mean_obs - mean_pred_0
-        
+
         optimal_tx_powers[idx] = optimal_tx_dbm
-        
+
         # Compute metrics with optimal power
         predicted_powers_dBm = predicted_powers_0dBm + optimal_tx_dbm
         power_errors = predicted_powers_dBm - observed_powers_dB
-        
+
         rmse_values[idx] = np.sqrt(np.mean(power_errors**2))
         mae_values[idx] = np.mean(np.abs(power_errors))
         max_error_values[idx] = np.max(np.abs(power_errors))
-        
+
         # Compute slope
         if len(distances_m) > 1:
             log_dist = np.log10(distances_m)
@@ -121,7 +121,7 @@ def compute_candidate_power_rmse(
             slope_values[idx] = coeffs[0]
         else:
             slope_values[idx] = -20.0 # Default assumption if not enough points (standard PL)
-    
+
     return rmse_values, mae_values, max_error_values, optimal_tx_powers, slope_values
 
 
@@ -359,12 +359,12 @@ def save_candidate_power_analysis(
 ):
     """
     Generate power estimation analysis plots for each candidate transmitter.
-    
+
     For each selected transmitter candidate, this function:
     1. Computes the predicted power at each sensor using the path loss model
     2. Compares predicted vs. observed power as a function of distance
     3. Saves a scatter plot for visual analysis
-    
+
     Parameters
     ----------
     info : dict
@@ -428,17 +428,17 @@ def save_candidate_power_analysis(
         n_sensors = len(sensor_locations)
         distances_m = np.zeros(n_sensors)
         predicted_powers_0dBm = np.zeros(n_sensors)
-        
+
         for j, sensor_loc in enumerate(sensor_locations):
             # Distance in pixels, then convert to meters
             dist_pixels = np.sqrt((sensor_loc[0] - tx_col)**2 + (sensor_loc[1] - tx_row)**2)
             distances_m[j] = max(dist_pixels * scale, 1.0)  # Minimum 1m to avoid singularity
-            
+
             # Compute path gain using log-distance model
             path_gain_linear = compute_linear_path_gain(
                 dist_pixels * scale, np_exponent=np_exponent, di0=1.0, pi0=0.0
             )
-            
+
             # Predicted received power = TX power * path gain
             predicted_power_0dBm = linear_to_dbm(path_gain_linear)
             predicted_powers_0dBm[j] = predicted_power_0dBm
@@ -774,6 +774,71 @@ def optimize_tx_powers_for_combination(
     total_power_dBm = 10 * np.log10(total_power_linear) if total_power_linear > 0 else -np.inf
 
     return optimal_powers_dBm, rmse, mae, max_error, total_power_dBm
+
+
+def recompute_powers_with_propagation_model(
+    combo_grid_indices: List[int],
+    A_model: np.ndarray,
+    observed_powers_dB: np.ndarray,
+    max_power_diff_dB: float = 20.0,
+    min_tx_power_dBm: float = -10.0,
+    max_tx_power_dBm: float = 50.0,
+) -> Tuple[np.ndarray, float, float, float, float]:
+    """
+    Recompute optimal TX powers using path gains from the localization
+    propagation model (e.g. TIREM) instead of the log-distance approximation.
+
+    This is intended to be called AFTER combinatorial TX selection has
+    determined the best TX locations using the fast log-distance model.
+    The selected locations are kept fixed, and only the TX powers are
+    re-optimized using the more accurate propagation matrix from
+    localization.
+
+    Parameters
+    ----------
+    combo_grid_indices : list of int
+        Grid indices (flattened) of the selected TX locations.
+    A_model : ndarray of shape (n_sensors, n_grid_cells)
+        Propagation matrix from the localization step.  Each element
+        A_model[j, i] is the linear path gain from grid cell i to sensor j.
+    observed_powers_dB : ndarray of shape (n_sensors,)
+        Observed powers at sensor locations in dBm.
+    max_power_diff_dB : float
+        Maximum allowed difference between TX powers in dB.
+    min_tx_power_dBm : float
+        Minimum TX power bound in dBm.
+    max_tx_power_dBm : float
+        Maximum TX power bound in dBm.
+
+    Returns
+    -------
+    optimal_powers_dBm : ndarray
+        Re-optimized TX powers in dBm.
+    rmse : float
+        RMSE between predicted and observed powers in dB.
+    mae : float
+        MAE between predicted and observed powers in dB.
+    max_error : float
+        Maximum absolute error in dB.
+    total_power_dBm : float
+        Total TX power (sum of linear powers, converted to dBm).
+    """
+    # Extract path gains for the selected TXs from the localization A_model
+    # A_model[:, idx] gives the linear gains from grid cell idx to all sensors
+    path_gains = A_model[:, combo_grid_indices].T  # (n_tx, n_sensors)
+
+    # combination_indices for optimize_tx_powers_for_combination are indices
+    # into the path_gains array, which here is [0, 1, ..., n_tx-1]
+    combination_indices = list(range(len(combo_grid_indices)))
+
+    return optimize_tx_powers_for_combination(
+        combination_indices=combination_indices,
+        path_gains=path_gains,
+        observed_powers_dB=observed_powers_dB,
+        max_power_diff_dB=max_power_diff_dB,
+        min_tx_power_dBm=min_tx_power_dBm,
+        max_tx_power_dBm=max_tx_power_dBm,
+    )
 
 
 def compute_bic(

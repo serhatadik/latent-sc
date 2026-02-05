@@ -77,6 +77,7 @@ from scripts.candidate_analysis import (
     filter_candidates_by_rmse,
     save_candidate_power_analysis,
     run_combinatorial_selection,
+    recompute_powers_with_propagation_model,
 )
 
 
@@ -925,6 +926,25 @@ def run_single_experiment(
                 info['solver_info']['combination_rmse'] = combination_result.get('best_rmse', np.inf)
                 info['solver_info']['combination_bic'] = combination_result.get('best_bic', np.inf)
 
+                # Step 5: Recompute optimal TX powers using the localization
+                # propagation model (e.g. TIREM) instead of the log-distance
+                # approximation used during candidate selection.  The TX
+                # locations are kept fixed; only powers are re-optimized so
+                # that reconstruction uses power estimates consistent with
+                # the actual propagation model.
+                A_model = info.get('A_model')
+                optimal_combo = info['solver_info']['optimal_combination']
+                if A_model is not None and len(optimal_combo) > 0:
+                    recomp_powers, recomp_rmse, recomp_mae, recomp_max_err, recomp_total = \
+                        recompute_powers_with_propagation_model(
+                            combo_grid_indices=optimal_combo,
+                            A_model=A_model,
+                            observed_powers_dB=observed_powers_dB,
+                            max_power_diff_dB=combo_max_power_diff_dB,
+                        )
+                    info['solver_info']['optimal_powers_dBm'] = recomp_powers
+                    info['solver_info']['combination_rmse'] = recomp_rmse
+
         # Save GLRT visualization if requested
         if save_visualization and output_dir is not None:
             save_glrt_visualization(
@@ -1076,7 +1096,8 @@ def run_single_experiment(
             verbose=False,
             output_dir=output_dir,
             experiment_name=experiment_name,
-            save_plot=save_visualization,  # Generate validation plot when visualizations enabled
+            save_plot=save_visualization,  # Generate validation plots when visualizations enabled
+            true_tx_locations=tx_locations,  # For spatial plot visualization
         )
 
         return {
@@ -1339,6 +1360,55 @@ def process_single_directory(args: Tuple) -> Tuple[List[Dict], str]:
     if failed > 0 and len(results) == 0:
         return results, f"all {attempted} experiments failed"
 
+    # --- Logging Results (before visualization re-run) ---
+    n_completed = len(results)
+    best_ale = float('inf')
+    max_prec = 0.0
+    max_pd = 0.0
+    best_count_err = 0.0
+
+    if n_completed > 0:
+        best_ale = min(r['ale'] for r in results)
+        max_prec = max(r['precision'] for r in results)
+        max_pd = max(r['pd'] for r in results)
+
+        # for count error, we want the one with min absolute value
+        errors = [r['count_error'] for r in results]
+        best_count_err = min(errors, key=abs)
+
+    # Format message
+    # [Dir Name] Comp: X | Best ALE: Y.YYm | Max Pd: P.PP | Max Prec: Z.ZZ | Best C.Err: W.WW
+    msg = (f"[{dir_name}] Comp: {n_completed}/{attempted} | "
+           f"Best ALE: {best_ale:.1f}m | "
+           f"Max Pd: {max_pd:.2f} | "
+           f"Max Prec: {max_prec:.2f} | "
+           f"Best C.Err: {best_count_err:.1f}")
+
+    if n_completed > 0:
+        # Identify best result
+        best_result = min(results, key=lambda r: r['ale'])
+        best_params = f"{best_result['strategy']}, {best_result['selection_method']}, {best_result['whitening_config']}"
+        if best_result['power_filtering']:
+             best_params += f", PF={best_result['power_threshold']}"
+        msg += f" | Best Params: [{best_params}]"
+
+    if failed > 0:
+        msg += f" | Failed: {failed}"
+
+    # 1. Print to stdout (will be captured by joblib and shown in main process)
+    print(f"  {msg}", flush=True)
+
+    # 2. Append to log file
+    try:
+        log_path = output_dir / "sweep_progress.log"
+        # Use append mode, and simple locking by OS (hope for the best with concurrency)
+        # For true safety we'd need a lock, but for simple logging this is usually fine
+        with open(log_path, "a", encoding="utf-8") as f:
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            f.write(f"[{timestamp}] {msg}\n")
+    except Exception:
+        pass # Don't fail the worker just because logging failed
+
     # --- Re-run best BIC experiment with visualizations (if requested) ---
     if not save_visualizations:
         print(f"  [{dir_name}] Skipping visualizations (disabled)", flush=True)
@@ -1405,57 +1475,6 @@ def process_single_directory(args: Tuple) -> Tuple[List[Dict], str]:
             except Exception as viz_exc:
                 print(f"  [{dir_name}] Warning: Failed to generate visualizations: {viz_exc}", flush=True)
 
-    # --- Logging Results ---
-    n_completed = len(results)
-    best_ale = float('inf')
-    max_prec = 0.0
-    max_pd = 0.0
-    best_count_err = 0.0
-    
-    if n_completed > 0:
-        best_ale = min(r['ale'] for r in results)
-        max_prec = max(r['precision'] for r in results)
-        max_pd = max(r['pd'] for r in results)
-        
-        # for count error, we want the one with min absolute value
-        errors = [r['count_error'] for r in results]
-        best_count_err = min(errors, key=abs)
-    
-    # Format message
-    # [Dir Name] Comp: X | Best ALE: Y.YYm | Max Pd: P.PP | Max Prec: Z.ZZ | Best C.Err: W.WW
-    # Format message
-    # [Dir Name] Comp: X | Best ALE: Y.YYm | Max Pd: P.PP | Max Prec: Z.ZZ | Best C.Err: W.WW
-    msg = (f"[{dir_name}] Comp: {n_completed}/{attempted} | "
-           f"Best ALE: {best_ale:.1f}m | "
-           f"Max Pd: {max_pd:.2f} | "
-           f"Max Prec: {max_prec:.2f} | "
-           f"Best C.Err: {best_count_err:.1f}")
-
-    if n_completed > 0:
-        # Identify best result
-        best_result = min(results, key=lambda r: r['ale'])
-        best_params = f"{best_result['strategy']}, {best_result['selection_method']}, {best_result['whitening_config']}"
-        if best_result['power_filtering']:
-             best_params += f", PF={best_result['power_threshold']}"
-        msg += f" | Best Params: [{best_params}]"
-           
-    if failed > 0:
-        msg += f" | Failed: {failed}"
-        
-    # 1. Print to stdout (will be captured by joblib and shown in main process)
-    print(f"  {msg}", flush=True)
-    
-    # 2. Append to log file
-    try:
-        log_path = output_dir / "sweep_progress.log"
-        # Use append mode, and simple locking by OS (hope for the best with concurrency)
-        # For true safety we'd need a lock, but for simple logging this is usually fine
-        with open(log_path, "a", encoding="utf-8") as f:
-            timestamp = datetime.now().strftime("%H:%M:%S")
-            f.write(f"[{timestamp}] {msg}\n")
-    except Exception:
-        pass # Don't fail the worker just because logging failed
-        
     return results, None  # None = no skip reason, processing succeeded
 
 

@@ -269,8 +269,11 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
         'power_unit': power_unit,
     }
 
+    # Always store A_model so downstream code (candidate analysis, validation)
+    # can use the same propagation model that was used for localization
+    info['A_model'] = A_model
+
     if verbose:
-        info['A_model'] = A_model
         info['W'] = W
         if 'V' in locals():
             info['cov_matrix'] = V
