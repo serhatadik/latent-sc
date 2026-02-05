@@ -78,6 +78,7 @@ from scripts.candidate_analysis import (
     save_candidate_power_analysis,
     run_combinatorial_selection,
     recompute_powers_with_propagation_model,
+    refit_with_per_tx_exponents,
 )
 
 
@@ -945,6 +946,28 @@ def run_single_experiment(
                     info['solver_info']['optimal_powers_dBm'] = recomp_powers
                     info['solver_info']['combination_rmse'] = recomp_rmse
 
+                # Step 5.5: Per-TX exponent refit (log_distance only)
+                # After localization, fit a per-TX path loss exponent from
+                # observed sensor data, rebuild path gains, and re-optimize
+                # powers.  This improves reconstruction when different TXs
+                # experience different propagation conditions.
+                if model_type == 'log_distance' and len(optimal_combo) > 0:
+                    per_tx_exp, _refit_gains, refit_powers, refit_rmse, \
+                        refit_mae, refit_max_err, refit_total = \
+                        refit_with_per_tx_exponents(
+                            combo_grid_indices=optimal_combo,
+                            map_shape=map_data['shape'],
+                            sensor_locations=sensor_locations,
+                            observed_powers_dB=observed_powers_dB,
+                            current_powers_dBm=info['solver_info']['optimal_powers_dBm'],
+                            scale=scale,
+                            np_exponent_global=np_exponent,
+                            max_power_diff_dB=combo_max_power_diff_dB,
+                        )
+                    info['solver_info']['per_tx_exponents'] = per_tx_exp.tolist()
+                    info['solver_info']['optimal_powers_dBm'] = refit_powers
+                    info['solver_info']['combination_rmse'] = refit_rmse
+
         # Save GLRT visualization if requested
         if save_visualization and output_dir is not None:
             save_glrt_visualization(
@@ -1098,6 +1121,7 @@ def run_single_experiment(
             experiment_name=experiment_name,
             save_plot=save_visualization,  # Generate validation plots when visualizations enabled
             true_tx_locations=tx_locations,  # For spatial plot visualization
+            per_tx_exponents=info.get('solver_info', {}).get('per_tx_exponents'),
         )
 
         return {
@@ -1130,6 +1154,7 @@ def run_single_experiment(
             'combo_powers_dBm': json.dumps(
                 [float(p) for p in info.get('solver_info', {}).get('optimal_powers_dBm', [])]
             ),
+            'per_tx_exponents': json.dumps(info.get('solver_info', {}).get('per_tx_exponents', [])),
             # Combinatorial selection localization metrics
             'combo_ale': combo_metrics['combo_ale'],
             'combo_tp': combo_metrics['combo_tp'],

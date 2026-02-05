@@ -17,7 +17,8 @@ matplotlib.use('Agg')  # Non-interactive backend
 import matplotlib.pyplot as plt
 
 from src.evaluation.validation import ReconstructionValidator
-from src.sparse_reconstruction import dbm_to_linear
+from src.propagation.log_distance import compute_linear_path_gain
+from src.sparse_reconstruction import dbm_to_linear, linear_to_dbm
 
 
 def normalize_tx_id(transmitters: List[str]) -> str:
@@ -466,6 +467,7 @@ def compute_reconstruction_error(
     experiment_name: Optional[str] = None,
     save_plot: bool = False,
     true_tx_locations: Optional[Dict] = None,
+    per_tx_exponents: Optional[List[float]] = None,
 ) -> Dict:
     """
     Compute reconstruction error metrics for a given TX estimate.
@@ -579,25 +581,40 @@ def compute_reconstruction_error(
         if model_config_path is None and model_type == 'tirem':
             model_config_path = str(project_root / 'config' / 'tirem_parameters.yaml')
 
-        validator.get_propagation_matrix(
-            model_type=model_type,
-            model_config_path=model_config_path,
-            scale=scale,
-            cache_dir=str(cache_dir),
-            verbose=verbose
-        )
-
-        # Build TX power map from combo_indices and combo_powers_dBm
         height, width = map_data['shape']
-        tx_map_linear = np.zeros((height, width), dtype=np.float64)
 
-        for idx, power_dBm in zip(combo_indices, combo_powers_dBm):
-            row = idx // width
-            col = idx % width
-            tx_map_linear[row, col] = dbm_to_linear(power_dBm)
+        if per_tx_exponents is not None and model_type == 'log_distance':
+            # Per-TX exponent path: compute K column vectors directly
+            # instead of the full (M_val x N_grid) propagation matrix
+            predicted_linear = np.zeros(len(validator.val_points))
+            for i, (grid_idx, power_dBm, n_i) in enumerate(
+                zip(combo_indices, combo_powers_dBm, per_tx_exponents)
+            ):
+                tx_row = grid_idx // width
+                tx_col = grid_idx % width
+                dx = (validator.val_points[:, 0] - tx_col) * scale
+                dy = (validator.val_points[:, 1] - tx_row) * scale
+                distances = np.sqrt(dx**2 + dy**2)
+                gains = compute_linear_path_gain(distances, np_exponent=n_i)
+                predicted_linear += dbm_to_linear(power_dBm) * gains
+            predicted_dBm = linear_to_dbm(predicted_linear)
+        else:
+            # Standard path: full propagation matrix (TIREM or global-exponent log_distance)
+            validator.get_propagation_matrix(
+                model_type=model_type,
+                model_config_path=model_config_path,
+                scale=scale,
+                cache_dir=str(cache_dir),
+                verbose=verbose
+            )
 
-        # Predict RSS at validation points
-        predicted_dBm = validator.predict_rss(tx_map_linear)
+            tx_map_linear = np.zeros((height, width), dtype=np.float64)
+            for idx, power_dBm in zip(combo_indices, combo_powers_dBm):
+                row = idx // width
+                col = idx % width
+                tx_map_linear[row, col] = dbm_to_linear(power_dBm)
+
+            predicted_dBm = validator.predict_rss(tx_map_linear)
 
         # Compute noise floor and clamp predictions
         # The propagation model can predict arbitrarily low values, but the

@@ -841,6 +841,247 @@ def recompute_powers_with_propagation_model(
     )
 
 
+def estimate_per_tx_exponents(
+    combo_grid_indices: List[int],
+    map_shape: Tuple[int, int],
+    sensor_locations: np.ndarray,
+    observed_powers_dB: np.ndarray,
+    current_powers_dBm: np.ndarray,
+    scale: float = 1.0,
+    np_exponent_global: float = 3.5,
+    n_min: float = 1.5,
+    n_max: float = 6.0,
+) -> np.ndarray:
+    """
+    Estimate per-TX path loss exponents from observed sensor data.
+
+    For K=1, direct regression of observed_powers_dB vs log10(distance).
+    For K>1, attribute observed power to each TX proportionally using
+    current power estimates and global-exponent path gains, then regress
+    per-TX.
+
+    Parameters
+    ----------
+    combo_grid_indices : list of int
+        Grid indices of selected TX locations
+    map_shape : tuple
+        (height, width) of the map
+    sensor_locations : ndarray of shape (M, 2)
+        Sensor locations in pixel coordinates (col, row)
+    observed_powers_dB : ndarray of shape (M,)
+        Observed powers in dBm
+    current_powers_dBm : ndarray of shape (K,)
+        Current TX power estimates in dBm
+    scale : float
+        Pixel-to-meter scaling factor
+    np_exponent_global : float
+        Global path loss exponent used as fallback
+    n_min : float
+        Minimum allowed exponent
+    n_max : float
+        Maximum allowed exponent
+
+    Returns
+    -------
+    per_tx_exponents : ndarray of shape (K,)
+        Fitted path loss exponent for each TX
+    """
+    height, width = map_shape
+    K = len(combo_grid_indices)
+    M = len(sensor_locations)
+
+    # Compute distances from each TX to all sensors
+    distances = np.zeros((K, M))
+    for i, grid_idx in enumerate(combo_grid_indices):
+        tx_row = grid_idx // width
+        tx_col = grid_idx % width
+        dx = (sensor_locations[:, 0] - tx_col) * scale
+        dy = (sensor_locations[:, 1] - tx_row) * scale
+        distances[i, :] = np.maximum(np.sqrt(dx**2 + dy**2), 1.0)
+
+    per_tx_exponents = np.full(K, np_exponent_global)
+
+    if K == 1:
+        # Direct regression: P_obs = intercept + slope * log10(d)
+        # slope = -10 * n  =>  n = -slope / 10
+        log_d = np.log10(distances[0, :])
+        if M >= 3:
+            coeffs = np.polyfit(log_d, observed_powers_dB, 1)
+            n_est = -coeffs[0] / 10.0
+            per_tx_exponents[0] = np.clip(n_est, n_min, n_max)
+    else:
+        # Multi-TX: attribute power proportionally
+        # Compute global-exponent path gains for attribution
+        gains_global = np.zeros((K, M))
+        for i in range(K):
+            gains_global[i, :] = compute_linear_path_gain(
+                distances[i, :], np_exponent=np_exponent_global, di0=1.0, pi0=0.0
+            )
+
+        # Fractional contribution: w_ij = P_tx_i * g_ij / sum_k(P_tx_k * g_kj)
+        tx_linear = dbm_to_linear(np.asarray(current_powers_dBm, dtype=float))
+        contrib = gains_global * tx_linear[:, np.newaxis]  # (K, M)
+        total_contrib = np.sum(contrib, axis=0)  # (M,)
+        total_contrib = np.maximum(total_contrib, 1e-30)
+
+        for i in range(K):
+            w = contrib[i, :] / total_contrib  # (M,)
+            # Filter sensors where this TX contributes meaningfully
+            mask = w >= 0.01
+            if np.sum(mask) < 3:
+                continue  # keep global exponent
+
+            # Attributed power in linear: P_obs_linear * w
+            obs_linear = dbm_to_linear(observed_powers_dB)
+            attributed_linear = obs_linear[mask] * w[mask]
+            attributed_dB = linear_to_dbm(attributed_linear)
+
+            log_d = np.log10(distances[i, mask])
+            coeffs = np.polyfit(log_d, attributed_dB, 1)
+            n_est = -coeffs[0] / 10.0
+            per_tx_exponents[i] = np.clip(n_est, n_min, n_max)
+
+    return per_tx_exponents
+
+
+def rebuild_path_gains_per_tx_exponent(
+    combo_grid_indices: List[int],
+    per_tx_exponents: np.ndarray,
+    map_shape: Tuple[int, int],
+    sensor_locations: np.ndarray,
+    scale: float = 1.0,
+) -> np.ndarray:
+    """
+    Rebuild path gain columns using per-TX exponents.
+
+    Parameters
+    ----------
+    combo_grid_indices : list of int
+        Grid indices of selected TX locations
+    per_tx_exponents : ndarray of shape (K,)
+        Per-TX path loss exponents
+    map_shape : tuple
+        (height, width) of the map
+    sensor_locations : ndarray of shape (M, 2)
+        Sensor locations in pixel coordinates (col, row)
+    scale : float
+        Pixel-to-meter scaling factor
+
+    Returns
+    -------
+    path_gains : ndarray of shape (K, M)
+        Linear path gain from each TX to each sensor
+    """
+    height, width = map_shape
+    K = len(combo_grid_indices)
+    M = len(sensor_locations)
+
+    path_gains = np.zeros((K, M))
+    for i, grid_idx in enumerate(combo_grid_indices):
+        tx_row = grid_idx // width
+        tx_col = grid_idx % width
+        dx = (sensor_locations[:, 0] - tx_col) * scale
+        dy = (sensor_locations[:, 1] - tx_row) * scale
+        distances = np.maximum(np.sqrt(dx**2 + dy**2), 1.0)
+        path_gains[i, :] = compute_linear_path_gain(
+            distances, np_exponent=per_tx_exponents[i], di0=1.0, pi0=0.0
+        )
+
+    return path_gains
+
+
+def refit_with_per_tx_exponents(
+    combo_grid_indices: List[int],
+    map_shape: Tuple[int, int],
+    sensor_locations: np.ndarray,
+    observed_powers_dB: np.ndarray,
+    current_powers_dBm: np.ndarray,
+    scale: float = 1.0,
+    np_exponent_global: float = 3.5,
+    n_min: float = 1.5,
+    n_max: float = 6.0,
+    max_power_diff_dB: float = 20.0,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float, float, float, float]:
+    """
+    Estimate per-TX exponents, rebuild path gains, and re-optimize powers.
+
+    Orchestrator that calls estimate_per_tx_exponents →
+    rebuild_path_gains_per_tx_exponent → optimize_tx_powers_for_combination.
+
+    Parameters
+    ----------
+    combo_grid_indices : list of int
+        Grid indices of selected TX locations
+    map_shape : tuple
+        (height, width) of the map
+    sensor_locations : ndarray of shape (M, 2)
+        Sensor locations in pixel coordinates (col, row)
+    observed_powers_dB : ndarray of shape (M,)
+        Observed powers in dBm
+    current_powers_dBm : ndarray of shape (K,)
+        Current TX power estimates in dBm
+    scale : float
+        Pixel-to-meter scaling factor
+    np_exponent_global : float
+        Global path loss exponent (starting point)
+    n_min : float
+        Minimum allowed exponent
+    n_max : float
+        Maximum allowed exponent
+    max_power_diff_dB : float
+        Maximum allowed difference between TX powers in dB
+
+    Returns
+    -------
+    per_tx_exponents : ndarray of shape (K,)
+        Fitted per-TX exponents
+    refit_path_gains : ndarray of shape (K, M)
+        Path gains built with per-TX exponents
+    refit_powers_dBm : ndarray of shape (K,)
+        Re-optimized TX powers in dBm
+    refit_rmse : float
+        RMSE after refit
+    refit_mae : float
+        MAE after refit
+    refit_max_error : float
+        Max absolute error after refit
+    refit_total_power : float
+        Total TX power in dBm after refit
+    """
+    per_tx_exponents = estimate_per_tx_exponents(
+        combo_grid_indices=combo_grid_indices,
+        map_shape=map_shape,
+        sensor_locations=sensor_locations,
+        observed_powers_dB=observed_powers_dB,
+        current_powers_dBm=current_powers_dBm,
+        scale=scale,
+        np_exponent_global=np_exponent_global,
+        n_min=n_min,
+        n_max=n_max,
+    )
+
+    refit_path_gains = rebuild_path_gains_per_tx_exponent(
+        combo_grid_indices=combo_grid_indices,
+        per_tx_exponents=per_tx_exponents,
+        map_shape=map_shape,
+        sensor_locations=sensor_locations,
+        scale=scale,
+    )
+
+    # Re-optimize powers using the per-TX exponent path gains
+    combination_indices = list(range(len(combo_grid_indices)))
+    refit_powers_dBm, refit_rmse, refit_mae, refit_max_error, refit_total_power = \
+        optimize_tx_powers_for_combination(
+            combination_indices=combination_indices,
+            path_gains=refit_path_gains,
+            observed_powers_dB=observed_powers_dB,
+            max_power_diff_dB=max_power_diff_dB,
+        )
+
+    return (per_tx_exponents, refit_path_gains, refit_powers_dBm,
+            refit_rmse, refit_mae, refit_max_error, refit_total_power)
+
+
 def compute_bic(
     n_sensors: int,
     n_tx: int,
