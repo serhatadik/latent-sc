@@ -610,6 +610,197 @@ def match_power_with_gps(
     return measurements
 
 
+def precompute_psds_with_gps_matching(
+    iq_data: Dict[np.datetime64, np.ndarray],
+    gps_coords: Dict[np.datetime64, np.ndarray],
+    sample_rate: float = DEFAULT_SAMPLE_RATE,
+    center_freq: float = DEFAULT_CENTER_FREQ,
+    progress_interval: int = 100,
+    time_tolerance_seconds: int = 10
+) -> Tuple[np.ndarray, List[Dict]]:
+    """
+    Precompute PSDs for all IQ samples and match with GPS coordinates.
+
+    This is an optimization for batch processing multiple transmitter combinations.
+    The FFT is computed once per timestamp, and the PSD is cached for later
+    extraction of different frequency channels.
+
+    Parameters
+    ----------
+    iq_data : Dict[np.datetime64, np.ndarray]
+        Dictionary mapping timestamps to IQ samples
+    gps_coords : Dict[np.datetime64, np.ndarray]
+        Dictionary mapping timestamps to [lon, lat] coordinates
+    sample_rate : float, optional
+        Sampling rate in Hz
+    center_freq : float, optional
+        Center frequency in Hz
+    progress_interval : int, optional
+        Print progress every N samples
+    time_tolerance_seconds : int, optional
+        Maximum time difference for matching GPS coordinates
+
+    Returns
+    -------
+    Tuple[np.ndarray, List[Dict]]
+        (frequencies, cached_data) where:
+        - frequencies: 1D array of frequency bins (same for all samples)
+        - cached_data: List of dicts with 'timestamp', 'longitude', 'latitude', 'psd_linear'
+    """
+    times = sorted(list(iq_data.keys()))
+    gps_times = np.array(sorted(list(gps_coords.keys())))
+    cached_data = []
+    frequencies = None
+
+    print(f"Precomputing PSDs for {len(times)} IQ samples...")
+    print(f"GPS time range: {gps_times[0]} to {gps_times[-1]}")
+    print(f"IQ time range: {times[0]} to {times[-1]}")
+    print(f"Time tolerance: ±{time_tolerance_seconds} seconds")
+
+    for i, time in enumerate(times):
+        if i % progress_interval == 0:
+            print(f"PSD precompute progress: {i}/{len(times)} ({i/len(times)*100:.1f}%)")
+
+        try:
+            # Find nearest GPS timestamp within tolerance
+            time_diffs = np.abs((gps_times - time).astype('timedelta64[s]').astype(int))
+            nearest_idx = np.argmin(time_diffs)
+            min_diff = time_diffs[nearest_idx]
+
+            if min_diff <= time_tolerance_seconds:
+                gps_time = gps_times[nearest_idx]
+                lon, lat = gps_coords[gps_time]
+
+                # Compute PSD with linear output
+                freq, psd_db, psd_linear = compute_psd(
+                    iq_data[time], sample_rate, center_freq, return_linear=True
+                )
+
+                # Store frequencies (same for all samples)
+                if frequencies is None:
+                    frequencies = freq
+
+                cached_data.append({
+                    'timestamp': time,
+                    'longitude': lon,
+                    'latitude': lat,
+                    'psd_linear': psd_linear
+                })
+
+            # Free IQ sample immediately after processing to reduce peak memory
+            # This way we don't hold both IQ data and cached PSDs simultaneously
+            del iq_data[time]
+
+        except Exception as e:
+            if i < 10:
+                print(f"Warning: Failed to process sample at {time}: {e}")
+            # Still try to free the IQ sample on error
+            if time in iq_data:
+                del iq_data[time]
+            continue
+
+    print(f"Precomputed PSDs for {len(cached_data)} samples with GPS matches")
+    return frequencies, cached_data
+
+
+def extract_power_for_combination(
+    frequencies: np.ndarray,
+    cached_data: List[Dict],
+    transmitter_names: List[str],
+    progress_interval: int = 500
+) -> List[Dict]:
+    """
+    Extract power for a specific transmitter combination from cached PSDs.
+
+    This is the fast path after PSDs have been precomputed. Only does
+    frequency band extraction and power summation (no FFT).
+
+    Parameters
+    ----------
+    frequencies : np.ndarray
+        Frequency array from precompute_psds_with_gps_matching()
+    cached_data : List[Dict]
+        Cached data from precompute_psds_with_gps_matching()
+    transmitter_names : List[str]
+        List of transmitter names to extract and sum power for
+    progress_interval : int, optional
+        Print progress every N samples
+
+    Returns
+    -------
+    List[Dict]
+        List of measurement dictionaries with 'timestamp', 'longitude',
+        'latitude', and 'power' (in dB)
+    """
+    # Validate transmitter names
+    for tx in transmitter_names:
+        if tx not in TRANSMITTER_TO_CHANNEL:
+            raise ValueError(f"Unknown transmitter: {tx}")
+
+    # Check for ebc/ustar conflict
+    has_ebc = 'ebc' in transmitter_names
+    has_ustar = 'ustar' in transmitter_names
+    if has_ebc and has_ustar:
+        raise ValueError("Cannot process both 'ebc' and 'ustar' in the same list.")
+
+    # Determine date filtering
+    apply_date_filter = has_ebc or has_ustar
+    filter_mode = 'ebc' if has_ebc else ('ustar' if has_ustar else None)
+
+    # Pre-compute channel bounds for all transmitters
+    channel_bounds = []
+    for tx in transmitter_names:
+        channel_name = TRANSMITTER_TO_CHANNEL[tx]
+        channel_min, channel_max = RF_CHANNELS[channel_name]
+        channel_bounds.append((channel_min, channel_max))
+
+    measurements = []
+    skipped_by_date = 0
+
+    for i, data in enumerate(cached_data):
+        if i % progress_interval == 0 and i > 0:
+            print(f"  Extraction progress: {i}/{len(cached_data)}")
+
+        timestamp = data['timestamp']
+
+        # Apply date filtering for EBC/USTAR
+        if apply_date_filter:
+            if filter_mode == 'ebc' and timestamp >= TX1_SPLIT_DATE:
+                skipped_by_date += 1
+                continue
+            elif filter_mode == 'ustar' and timestamp < TX1_SPLIT_DATE:
+                skipped_by_date += 1
+                continue
+
+        # Extract and sum linear powers for all transmitters
+        psd_linear = data['psd_linear']
+        total_linear_power = 0.0
+
+        for channel_min, channel_max in channel_bounds:
+            linear_power = extract_channel_power_linear(
+                frequencies, psd_linear, channel_min, channel_max
+            )
+            total_linear_power += linear_power
+
+        # Convert to dB
+        if total_linear_power > 0:
+            power_db = 10.0 * np.log10(total_linear_power)
+        else:
+            power_db = -200.0
+
+        measurements.append({
+            'timestamp': timestamp,
+            'power': power_db,
+            'longitude': data['longitude'],
+            'latitude': data['latitude']
+        })
+
+    if skipped_by_date > 0:
+        print(f"  Skipped {skipped_by_date} samples outside date range")
+
+    return measurements
+
+
 def aggregate_measurements_by_location(
     measurements: List[Dict],
     dedup_threshold_meters: float = 20.0,
