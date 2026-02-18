@@ -449,6 +449,148 @@ def save_validation_spatial_plot(
     plt.close(fig)
 
 
+def save_reconstruction_error_spatial_plot(
+    combo_indices: List[int],
+    combo_powers_dBm: List[float],
+    val_points: np.ndarray,
+    observed_val_powers_dBm: np.ndarray,
+    predicted_val_powers_dBm: np.ndarray,
+    map_shape: Tuple[int, int],
+    scale: float,
+    true_tx_locations: Optional[Dict] = None,
+    metrics: Optional[Dict] = None,
+    output_dir: Optional[Path] = None,
+    experiment_name: Optional[str] = None,
+) -> None:
+    """
+    Generate spatial plot showing reconstruction error at each validation point.
+
+    Similar to save_validation_spatial_plot but colors points by the signed
+    reconstruction error (predicted - observed) using a diverging colormap.
+
+    Parameters
+    ----------
+    combo_indices : list of int
+        Grid indices of estimated TX locations
+    combo_powers_dBm : list of float
+        Estimated TX powers in dBm
+    val_points : ndarray
+        Validation point locations in pixel coordinates, shape (N, 2) as [col, row]
+    observed_val_powers_dBm : ndarray
+        Observed validation powers in dBm
+    predicted_val_powers_dBm : ndarray
+        Predicted validation powers in dBm
+    map_shape : tuple
+        (height, width) of the map
+    scale : float
+        Pixel-to-meter scaling factor
+    true_tx_locations : dict, optional
+        Dictionary of true TX locations {name: {'coordinates': [col, row]}}
+    metrics : dict, optional
+        Computed metrics (rmse, mae, bias, etc.)
+    output_dir : Path, optional
+        Directory to save figure
+    experiment_name : str, optional
+        Name for this experiment
+    """
+    if len(val_points) == 0:
+        return
+
+    if output_dir is None or experiment_name is None:
+        return
+
+    vis_dir = output_dir / 'glrt_visualizations' / experiment_name
+    vis_dir.mkdir(parents=True, exist_ok=True)
+
+    height, width = map_shape
+    n_val = len(val_points)
+    n_tx = len(combo_indices)
+
+    # Compute signed error: positive = overprediction, negative = underprediction
+    error_dB = predicted_val_powers_dBm - observed_val_powers_dBm
+
+    # Create figure
+    fig, ax = plt.subplots(figsize=(12, 10))
+
+    # val_points is [col, row] format
+    val_cols = val_points[:, 0]
+    val_rows = val_points[:, 1]
+
+    # Scatter plot of validation points colored by reconstruction error
+    scatter = ax.scatter(val_cols, val_rows, c=error_dB,
+                         cmap='RdBu_r', s=15, alpha=0.7, edgecolor='none',
+                         label=f'Validation ({n_val} pts)')
+
+    # Add colorbar
+    cbar = plt.colorbar(scatter, ax=ax, shrink=0.8, pad=0.02)
+    cbar.set_label('Reconstruction Error (dB)', fontsize=11)
+
+    # Plot estimated TX locations
+    if n_tx > 0:
+        est_tx_cols = []
+        est_tx_rows = []
+        for idx in combo_indices:
+            tx_row = idx // width
+            tx_col = idx % width
+            est_tx_cols.append(tx_col)
+            est_tx_rows.append(tx_row)
+
+        ax.scatter(est_tx_cols, est_tx_rows, c='red', s=300, marker='*',
+                   edgecolor='black', linewidth=1.5, zorder=10,
+                   label=f'Estimated TX ({n_tx})')
+
+        # Add power labels next to estimated TXs
+        for i, (col, row) in enumerate(zip(est_tx_cols, est_tx_rows)):
+            ax.annotate(f'{combo_powers_dBm[i]:.0f}dBm',
+                        (col, row), xytext=(8, 8), textcoords='offset points',
+                        fontsize=9, fontweight='bold', color='red',
+                        bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.7))
+
+    # Plot true TX locations
+    if true_tx_locations is not None and len(true_tx_locations) > 0:
+        true_cols = []
+        true_rows = []
+        true_names = []
+        for name, loc in true_tx_locations.items():
+            coords = loc['coordinates']
+            true_cols.append(coords[0])
+            true_rows.append(coords[1])
+            true_names.append(name)
+
+        ax.scatter(true_cols, true_rows, c='lime', s=400, marker='X',
+                   edgecolor='black', linewidth=2, zorder=9,
+                   label=f'True TX ({len(true_tx_locations)})')
+
+        # Add name labels next to true TXs
+        for name, col, row in zip(true_names, true_cols, true_rows):
+            ax.annotate(name, (col, row), xytext=(-8, -15), textcoords='offset points',
+                        fontsize=9, fontweight='bold', color='darkgreen',
+                        bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.7))
+
+    # Set axis limits to map bounds
+    ax.set_xlim(0, width)
+    ax.set_ylim(0, height)
+
+    # Formatting
+    ax.set_xlabel(f'Column (pixel) [{scale:.1f} m/pixel]', fontsize=11)
+    ax.set_ylabel(f'Row (pixel) [{scale:.1f} m/pixel]', fontsize=11)
+
+    # Build title
+    title = "Reconstruction Error Spatial Distribution\n"
+    if metrics is not None:
+        title += f"RMSE: {metrics['rmse']:.1f} dB | MAE: {metrics['mae']:.1f} dB | Bias: {metrics['bias']:.1f} dB"
+    ax.set_title(title, fontsize=12)
+
+    ax.legend(loc='upper right', fontsize=10)
+    ax.set_aspect('equal')
+    ax.grid(True, alpha=0.2)
+
+    # Save figure
+    fig_path = vis_dir / "reconstruction_error_spatial_map.png"
+    plt.savefig(fig_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+
+
 def compute_reconstruction_error(
     combo_indices: List[int],
     combo_powers_dBm: List[float],
@@ -681,6 +823,25 @@ def compute_reconstruction_error(
             except Exception as plot_err:
                 if verbose:
                     print(f"  Failed to save validation spatial plot: {plot_err}")
+
+            # Reconstruction error spatial map
+            try:
+                save_reconstruction_error_spatial_plot(
+                    combo_indices=combo_indices,
+                    combo_powers_dBm=combo_powers_dBm,
+                    val_points=validator.val_points,
+                    observed_val_powers_dBm=validator.observed_powers_dBm,
+                    predicted_val_powers_dBm=predicted_dBm,
+                    map_shape=map_data['shape'],
+                    scale=scale,
+                    true_tx_locations=true_tx_locations,
+                    metrics=metrics,
+                    output_dir=output_dir,
+                    experiment_name=experiment_name,
+                )
+            except Exception as plot_err:
+                if verbose:
+                    print(f"  Failed to save reconstruction error spatial plot: {plot_err}")
 
     except Exception as e:
         if verbose:
