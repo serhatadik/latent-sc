@@ -397,7 +397,23 @@ def main():
         output_dir = Path(args.output_dir)
     else:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_dir = Path(f'results/ablation_study_{timestamp}')
+        # Encode CLI args into directory name
+        name_parts = [f'ablation_study_{timestamp}']
+        if args.factors:
+            name_parts.append(f'factors_{args.factors.replace(",", "-")}')
+        if args.tx_counts:
+            name_parts.append(f'tx_{args.tx_counts.replace(",", "-")}')
+        if args.nloc is not None:
+            name_parts.append(f'nloc_{args.nloc}')
+        if args.max_dirs is not None:
+            name_parts.append(f'maxdirs_{args.max_dirs}')
+        if args.baseline_model != 'tirem':
+            name_parts.append(f'model_{args.baseline_model}')
+        if args.eta != 0.1:
+            name_parts.append(f'eta_{args.eta}')
+        if args.test:
+            name_parts.append('test')
+        output_dir = Path('results') / '_'.join(name_parts)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # -- Parse filters --
