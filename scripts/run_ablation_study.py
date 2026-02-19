@@ -57,19 +57,19 @@ from src.sparse_reconstruction import dbm_to_linear
 # ===========================================================================
 BASELINE_CONFIG = {
     # Whitening
-    'whitening_method': 'hetero_spatial',
-    'whitening_config_name': 'hetero_spatial',
+    'whitening_method': 'hetero_diag',
+    'whitening_config_name': 'hetero_diag',
     'feature_rho': None,
     # Beam search
-    'beam_width': 3,
+    'beam_width': 5,
     # Selection method
     'selection_method': 'max',
     'use_power_filtering': False,
     'power_density_threshold': 0.3,
     # Pool refinement & dedup
     'pool_refinement': True,
-    'dedupe_distance_m': 60.0,
-    'max_pool_size': 50,
+    'dedupe_distance_m': 25.0,
+    'max_pool_size': 100,
     # Physics filters
     'max_tx_power_dbm': 40.0,
     'veto_margin_db': 5.0,
@@ -172,7 +172,7 @@ CUMULATIVE_STAGES = [
         'overrides': {
             'beam_width': 1,
             'pool_refinement': True,
-            'dedupe_distance_m': 60.0,
+            'dedupe_distance_m': 25.0,
             'max_tx_power_dbm': 40.0,
             'veto_margin_db': 5.0,
             'ceiling_penalty_weight': 0.1,
@@ -184,9 +184,9 @@ CUMULATIVE_STAGES = [
     {
         'name': '+Beam Search',
         'overrides': {
-            'beam_width': 3,
+            'beam_width': 5,
             'pool_refinement': True,
-            'dedupe_distance_m': 60.0,
+            'dedupe_distance_m': 25.0,
             'max_tx_power_dbm': 40.0,
             'veto_margin_db': 5.0,
             'ceiling_penalty_weight': 0.1,
@@ -505,7 +505,17 @@ def main():
     total_dirs = len(all_dirs)
     print(f"  Total directories: {total_dirs}")
     print(f"  TX counts: {sorted(grouped_dirs.keys())}")
-    print(f"  Selected factors: {selected_factors}")
+    print(f"  Selected factors:")
+    for sf in selected_factors:
+        if sf in ABLATION_FACTORS:
+            variants = [v['name'] for v in ABLATION_FACTORS[sf]['variants']]
+            baseline = ABLATION_FACTORS[sf].get('baseline_variant', '')
+            print(f"    {sf}: {variants}  (baseline: {baseline})")
+        elif sf == 'cross_model':
+            print(f"    {sf}: 3x3 matrix of localization x reconstruction models")
+        elif sf == 'cumulative':
+            stage_names = [s['name'] for s in CUMULATIVE_STAGES]
+            print(f"    {sf}: {stage_names}")
     print(f"  Baseline localization model: {baseline_loc_model}")
     print(f"  Baseline reconstruction model: {baseline_recon_model}")
     print(f"  Workers: {args.workers}")

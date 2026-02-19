@@ -153,17 +153,39 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
                 print("  Cholesky failed with reg=0.0. Retrying with minimal regularization (1e-30)...")
             W = compute_whitening_matrix(V, method='cholesky', verbose=verbose, regularization=1e-30)
 
-    # Default: Spatial covariance whitening (exponential decay) — homoscedastic
+    elif whitening_method == 'hetero_geo_aware':
+        # Dynamic per-candidate whitening is handled inside the GLRT solver.
+        # Here we compute a heteroscedastic diagonal W as the fallback for
+        # non-dynamic code paths (pool refinement refit, final amplitude solve).
+        if verbose:
+            print("  Using hetero_geo_aware (dynamic whitening in GLRT solver)...")
+            print(f"    Fallback W: hetero_diag (sigma_noise={sigma_noise:.2e}, eta={eta:.2f})")
+        W = compute_whitening_matrix(
+            method='hetero_diag',
+            observed_powers=observed_powers_linear,
+            sigma_noise=sigma_noise,
+            eta=eta,
+            verbose=verbose,
+        )
+
+    elif whitening_method == 'identity':
+        # No whitening: W = I.  Useful as a baseline to isolate the effect
+        # of whitening from the rest of the pipeline.
+        if verbose:
+            print("  Using identity whitening (W = I, no correlation assumed)")
+        W = np.eye(M)
+
+    # Default: Spatial covariance whitening (exponential decay) — homo-spatial
     else:
         if solve_in_linear_domain:
             # Linear-domain solving: sigma must match observation scale.
             # The dB-domain default (sigma=4.5) is ~10^16× too large for
             # linear powers of O(1e-9), making GLRT scores vanishingly small.
-            # Use a single homoscedastic std derived from the observations.
+            # Use a single homo-spatial std derived from the observations.
             sigma_homo = np.sqrt(sigma_noise**2 + (eta * np.mean(observed_powers_linear))**2)
 
             if verbose:
-                print(f"  Building homoscedastic spatial covariance (sigma_homo={sigma_homo:.2e}, delta_c={delta_c})")
+                print(f"  Building homo-spatial covariance (sigma_homo={sigma_homo:.2e}, delta_c={delta_c})")
 
             R = build_covariance_matrix(
                 sensor_locations, sigma=1.0, delta_c=delta_c, scale=scale
@@ -200,6 +222,11 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
     )
     if solver == 'glrt':
         from .glrt_solver import solve_iterative_glrt
+        # Forward whitening parameters consumed as named params so the GLRT
+        # solver can access them (it reads from solver_kwargs).
+        solver_kwargs['whitening_method'] = whitening_method
+        solver_kwargs['sigma_noise'] = sigma_noise
+        solver_kwargs['eta'] = eta
         t_est, solver_info = solve_iterative_glrt(
             A_model, W, observed_powers_linear,
             selection_method=selection_method,
