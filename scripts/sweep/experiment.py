@@ -381,6 +381,15 @@ def run_single_experiment(
     combo_max_power_diff_dB: float = 20.0,
     combo_sensor_proximity_threshold_m: float = 100.0,
     combo_sensor_proximity_penalty: float = 10.0,
+
+    # Ablation study toggles (backward-compatible defaults)
+    pool_refinement: bool = True,
+    max_tx_power_dbm: float = 40.0,
+    veto_margin_db: float = 5.0,
+    ceiling_penalty_weight: float = 0.1,
+    rmse_threshold: float = 20.0,
+    max_error_threshold: float = 38.0,
+    skip_bic_selection: bool = False,
 ) -> Optional[Dict]:
     """
     Run a single reconstruction experiment.
@@ -485,8 +494,10 @@ def run_single_experiment(
             'n_jobs': -1,
             'beam_width': beam_width,
             'max_pool_size': max_pool_size,
-            'max_pool_size': max_pool_size,
-            'pool_refinement': True, # Always enable refinement for sweep
+            'pool_refinement': pool_refinement,
+            'max_tx_power_dbm': max_tx_power_dbm,
+            'veto_margin_db': veto_margin_db,
+            'ceiling_penalty_weight': ceiling_penalty_weight,
             'use_edf_penalty': use_edf_penalty,
             'edf_threshold': edf_threshold,
             'use_robust_scoring': use_robust_scoring,
@@ -538,8 +549,8 @@ def run_single_experiment(
                     output_dir=output_dir,
                     experiment_name=experiment_name,
                     min_candidates=1,
-                    rmse_threshold=20.0,
-                    max_error_threshold=38.0,
+                    rmse_threshold=rmse_threshold,
+                    max_error_threshold=max_error_threshold,
                     save_plot=save_visualization,  # Only save plot if visualizing
                 )
 
@@ -564,99 +575,103 @@ def run_single_experiment(
                         candidate_indices=filtered_support,
                     )
 
-                # Step 4: Run combinatorial TX selection optimization (always, for BIC)
-                # Find optimal combination of TXs that best explains observations
-                # Only generate plots if save_visualization is True
-                combination_result = run_combinatorial_selection(
-                    info=info,
-                    tx_map=tx_map,
-                    map_data=map_data,
-                    sensor_locations=sensor_locations,
-                    observed_powers_dB=observed_powers_dB,
-                    tx_locations=tx_locations,
-                    output_dir=output_dir,
-                    experiment_name=experiment_name,
-                    filtered_support=filtered_support,
-                    scale=scale,
-                    np_exponent=np_exponent,
-                    min_distance_m=combo_min_distance_m,
-                    max_combination_size=combo_max_size,
-                    max_candidates_to_consider=combo_max_candidates,
-                    bic_penalty_weight=combo_bic_weight,
-                    max_power_diff_dB=combo_max_power_diff_dB,
-                    sensor_proximity_threshold_m=combo_sensor_proximity_threshold_m,
-                    sensor_proximity_penalty=combo_sensor_proximity_penalty,
-                    max_plots=10,
-                    save_plots=save_visualization,  # Only generate plots if visualizing
-                    verbose=False,
-                )
+                if not skip_bic_selection:
+                    # Step 4: Run combinatorial TX selection optimization (for BIC)
+                    # Find optimal combination of TXs that best explains observations
+                    combination_result = run_combinatorial_selection(
+                        info=info,
+                        tx_map=tx_map,
+                        map_data=map_data,
+                        sensor_locations=sensor_locations,
+                        observed_powers_dB=observed_powers_dB,
+                        tx_locations=tx_locations,
+                        output_dir=output_dir,
+                        experiment_name=experiment_name,
+                        filtered_support=filtered_support,
+                        scale=scale,
+                        np_exponent=np_exponent,
+                        min_distance_m=combo_min_distance_m,
+                        max_combination_size=combo_max_size,
+                        max_candidates_to_consider=combo_max_candidates,
+                        bic_penalty_weight=combo_bic_weight,
+                        max_power_diff_dB=combo_max_power_diff_dB,
+                        sensor_proximity_threshold_m=combo_sensor_proximity_threshold_m,
+                        sensor_proximity_penalty=combo_sensor_proximity_penalty,
+                        max_plots=10,
+                        save_plots=save_visualization,
+                        verbose=False,
+                    )
 
-                # Store combination result in info
-                info['solver_info']['combination_result'] = combination_result
-                info['solver_info']['optimal_combination'] = combination_result.get('best_combination', [])
-                info['solver_info']['optimal_powers_dBm'] = combination_result.get('best_powers_dBm', np.array([]))
-                info['solver_info']['combination_rmse'] = combination_result.get('best_rmse', np.inf)
-                info['solver_info']['combination_bic'] = combination_result.get('best_bic', np.inf)
+                    # Store combination result in info
+                    info['solver_info']['combination_result'] = combination_result
+                    info['solver_info']['optimal_combination'] = combination_result.get('best_combination', [])
+                    info['solver_info']['optimal_powers_dBm'] = combination_result.get('best_powers_dBm', np.array([]))
+                    info['solver_info']['combination_rmse'] = combination_result.get('best_rmse', np.inf)
+                    info['solver_info']['combination_bic'] = combination_result.get('best_bic', np.inf)
 
-                # Step 5: Recompute optimal TX powers using the reconstruction
-                # propagation model instead of the log-distance approximation
-                # used during candidate selection.  The TX locations are kept
-                # fixed; only powers are re-optimized so that reconstruction
-                # uses power estimates consistent with the reconstruction
-                # propagation model.
-                optimal_combo = info['solver_info']['optimal_combination']
-                if len(optimal_combo) > 0:
-                    # Get the propagation matrix for reconstruction
-                    if recon_model_type == model_type:
-                        # Same model -- reuse A_model from localization
-                        A_recon = info.get('A_model')
-                    else:
-                        # Different model -- compute propagation matrix
-                        # for reconstruction model with sensor locations
-                        from src.sparse_reconstruction.propagation_matrix import compute_propagation_matrix as _compute_prop_matrix
-                        A_recon = _compute_prop_matrix(
-                            sensor_locations=sensor_locations,
-                            map_shape=map_data['shape'],
-                            scale=scale,
-                            model_type=recon_model_type,
-                            config_path=recon_model_config_path,
-                            np_exponent=np_exponent,
-                            n_jobs=-1,
-                            verbose=False,
-                        )
+                    # Step 5: Recompute optimal TX powers using the reconstruction
+                    # propagation model instead of the log-distance approximation
+                    # used during candidate selection.
+                    optimal_combo = info['solver_info']['optimal_combination']
+                    if len(optimal_combo) > 0:
+                        # Get the propagation matrix for reconstruction
+                        if recon_model_type == model_type:
+                            A_recon = info.get('A_model')
+                        else:
+                            from src.sparse_reconstruction.propagation_matrix import compute_propagation_matrix as _compute_prop_matrix
+                            A_recon = _compute_prop_matrix(
+                                sensor_locations=sensor_locations,
+                                map_shape=map_data['shape'],
+                                scale=scale,
+                                model_type=recon_model_type,
+                                config_path=recon_model_config_path,
+                                np_exponent=np_exponent,
+                                n_jobs=-1,
+                                verbose=False,
+                            )
 
-                    if A_recon is not None:
-                        recomp_powers, recomp_rmse, recomp_mae, recomp_max_err, recomp_total = \
-                            recompute_powers_with_propagation_model(
+                        if A_recon is not None:
+                            recomp_powers, recomp_rmse, recomp_mae, recomp_max_err, recomp_total = \
+                                recompute_powers_with_propagation_model(
+                                    combo_grid_indices=optimal_combo,
+                                    A_model=A_recon,
+                                    observed_powers_dB=observed_powers_dB,
+                                    max_power_diff_dB=combo_max_power_diff_dB,
+                                )
+                            info['solver_info']['optimal_powers_dBm'] = recomp_powers
+                            info['solver_info']['combination_rmse'] = recomp_rmse
+
+                    # Step 5.5: Per-TX exponent refit (log_distance reconstruction only)
+                    if recon_model_type == 'log_distance' and len(optimal_combo) > 0:
+                        per_tx_exp, _refit_gains, refit_powers, refit_rmse, \
+                            refit_mae, refit_max_err, refit_total = \
+                            refit_with_per_tx_exponents(
                                 combo_grid_indices=optimal_combo,
-                                A_model=A_recon,
+                                map_shape=map_data['shape'],
+                                sensor_locations=sensor_locations,
                                 observed_powers_dB=observed_powers_dB,
+                                current_powers_dBm=info['solver_info']['optimal_powers_dBm'],
+                                scale=scale,
+                                np_exponent_global=np_exponent,
                                 max_power_diff_dB=combo_max_power_diff_dB,
                             )
-                        info['solver_info']['optimal_powers_dBm'] = recomp_powers
-                        info['solver_info']['combination_rmse'] = recomp_rmse
+                        info['solver_info']['per_tx_exponents'] = per_tx_exp.tolist()
+                        info['solver_info']['optimal_powers_dBm'] = refit_powers
+                        info['solver_info']['combination_rmse'] = refit_rmse
 
-                # Step 5.5: Per-TX exponent refit (log_distance reconstruction only)
-                # After localization, fit a per-TX path loss exponent from
-                # observed sensor data, rebuild path gains, and re-optimize
-                # powers.  This improves reconstruction when different TXs
-                # experience different propagation conditions.
-                if recon_model_type == 'log_distance' and len(optimal_combo) > 0:
-                    per_tx_exp, _refit_gains, refit_powers, refit_rmse, \
-                        refit_mae, refit_max_err, refit_total = \
-                        refit_with_per_tx_exponents(
-                            combo_grid_indices=optimal_combo,
-                            map_shape=map_data['shape'],
-                            sensor_locations=sensor_locations,
-                            observed_powers_dB=observed_powers_dB,
-                            current_powers_dBm=info['solver_info']['optimal_powers_dBm'],
-                            scale=scale,
-                            np_exponent_global=np_exponent,
-                            max_power_diff_dB=combo_max_power_diff_dB,
-                        )
-                    info['solver_info']['per_tx_exponents'] = per_tx_exp.tolist()
-                    info['solver_info']['optimal_powers_dBm'] = refit_powers
-                    info['solver_info']['combination_rmse'] = refit_rmse
+                else:
+                    # BIC selection disabled: use filtered support directly
+                    info['solver_info']['optimal_combination'] = list(filtered_support)
+                    # Use per-candidate optimal powers from RMSE computation
+                    filtered_indices_set = {idx: i for i, idx in enumerate(final_support)}
+                    combo_powers = np.array([
+                        optimal_tx_powers[filtered_indices_set[idx]]
+                        for idx in filtered_support
+                        if idx in filtered_indices_set
+                    ])
+                    info['solver_info']['optimal_powers_dBm'] = combo_powers
+                    info['solver_info']['combination_rmse'] = np.nan
+                    info['solver_info']['combination_bic'] = np.nan
 
         # Save GLRT visualization if requested
         if save_visualization and output_dir is not None:
