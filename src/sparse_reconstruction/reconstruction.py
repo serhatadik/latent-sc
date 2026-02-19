@@ -153,15 +153,35 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
                 print("  Cholesky failed with reg=0.0. Retrying with minimal regularization (1e-30)...")
             W = compute_whitening_matrix(V, method='cholesky', verbose=verbose, regularization=1e-30)
 
-    # Default: Spatial covariance whitening (exponential decay)
+    # Default: Spatial covariance whitening (exponential decay) — homoscedastic
     else:
-        if verbose:
-            print(f"  Building spatial covariance matrix (sigma={sigma}, delta_c={delta_c})")
-        # Build V using likelihood module
-        V = build_covariance_matrix(sensor_locations, sigma=sigma, delta_c=delta_c, scale=scale)
-        
-        # Compute W = V^(-1/2) using Cholesky
-        W = compute_whitening_matrix(cov_matrix=V, method='cholesky', verbose=verbose)
+        if solve_in_linear_domain:
+            # Linear-domain solving: sigma must match observation scale.
+            # The dB-domain default (sigma=4.5) is ~10^16× too large for
+            # linear powers of O(1e-9), making GLRT scores vanishingly small.
+            # Use a single homoscedastic std derived from the observations.
+            sigma_homo = np.sqrt(sigma_noise**2 + (eta * np.mean(observed_powers_linear))**2)
+
+            if verbose:
+                print(f"  Building homoscedastic spatial covariance (sigma_homo={sigma_homo:.2e}, delta_c={delta_c})")
+
+            R = build_covariance_matrix(
+                sensor_locations, sigma=1.0, delta_c=delta_c, scale=scale
+            )
+            V = sigma_homo**2 * R
+
+            try:
+                W = compute_whitening_matrix(V, method='cholesky', verbose=verbose, regularization=0.0)
+            except np.linalg.LinAlgError:
+                if verbose:
+                    print("  Cholesky failed with reg=0.0. Retrying with minimal regularization (1e-30)...")
+                W = compute_whitening_matrix(V, method='cholesky', verbose=verbose, regularization=1e-30)
+        else:
+            # dB-domain solving: use legacy sigma (dB-scale shadowing std)
+            if verbose:
+                print(f"  Building spatial covariance matrix (sigma={sigma}, delta_c={delta_c})")
+            V = build_covariance_matrix(sensor_locations, sigma=sigma, delta_c=delta_c, scale=scale)
+            W = compute_whitening_matrix(cov_matrix=V, method='cholesky', verbose=verbose)
 
     # Step 4: Compute Propagation Matrix (A)
     # This computes linear path gains from every pixel to every sensor

@@ -388,7 +388,17 @@ def main():
     parser.add_argument(
         '--baseline-model', type=str, default='tirem',
         choices=['tirem', 'log_distance', 'raytracing'],
-        help='Baseline propagation model (default: tirem)'
+        help='Baseline propagation model for both localization and reconstruction (default: tirem)'
+    )
+    parser.add_argument(
+        '--baseline-localization-model', type=str, default=None,
+        choices=['tirem', 'log_distance', 'raytracing'],
+        help='Baseline localization model (overrides --baseline-model for localization)'
+    )
+    parser.add_argument(
+        '--baseline-reconstruction-model', type=str, default=None,
+        choices=['tirem', 'log_distance', 'raytracing'],
+        help='Baseline reconstruction model (overrides --baseline-model for reconstruction)'
     )
     args = parser.parse_args()
 
@@ -407,8 +417,13 @@ def main():
             name_parts.append(f'nloc_{args.nloc}')
         if args.max_dirs is not None:
             name_parts.append(f'maxdirs_{args.max_dirs}')
-        if args.baseline_model != 'tirem':
-            name_parts.append(f'model_{args.baseline_model}')
+        loc_model = args.baseline_localization_model or args.baseline_model
+        recon_model = args.baseline_reconstruction_model or args.baseline_model
+        if loc_model == recon_model:
+            if loc_model != 'tirem':
+                name_parts.append(f'model_{loc_model}')
+        else:
+            name_parts.append(f'loc_{loc_model}_recon_{recon_model}')
         if args.eta != 0.1:
             name_parts.append(f'eta_{args.eta}')
         if args.test:
@@ -436,9 +451,11 @@ def main():
     else:
         selected_factors = all_factor_keys
 
-    # Update baseline model
-    BASELINE_CONFIG['model_type'] = args.baseline_model
-    BASELINE_CONFIG['recon_model_type'] = args.baseline_model
+    # Update baseline models (specific flags override --baseline-model)
+    baseline_loc_model = args.baseline_localization_model or args.baseline_model
+    baseline_recon_model = args.baseline_reconstruction_model or args.baseline_model
+    BASELINE_CONFIG['model_type'] = baseline_loc_model
+    BASELINE_CONFIG['recon_model_type'] = baseline_recon_model
 
     # -- Load data --
     print("=" * 70)
@@ -489,7 +506,8 @@ def main():
     print(f"  Total directories: {total_dirs}")
     print(f"  TX counts: {sorted(grouped_dirs.keys())}")
     print(f"  Selected factors: {selected_factors}")
-    print(f"  Baseline model: {args.baseline_model}")
+    print(f"  Baseline localization model: {baseline_loc_model}")
+    print(f"  Baseline reconstruction model: {baseline_recon_model}")
     print(f"  Workers: {args.workers}")
     print(f"  Test mode: {args.test}")
 
