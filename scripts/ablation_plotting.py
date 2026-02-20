@@ -26,14 +26,13 @@ ABLATION_FACTORS = {
         'display_name': 'Whitening Method',
         'type': 'comparison',
         'variants': [
-            {'name': 'Identity (None)',  'whitening_method': 'identity',               'whitening_config_name': 'identity'},
             {'name': 'Homo-Spatial',     'whitening_method': 'spatial_corr_exp_decay',  'whitening_config_name': 'homo_spatial'},
             {'name': 'Hetero-Diagonal',  'whitening_method': 'hetero_diag',            'whitening_config_name': 'hetero_diag'},
             {'name': 'Hetero-Spatial',   'whitening_method': 'hetero_spatial',          'whitening_config_name': 'hetero_spatial'},
             {'name': 'Hetero-Geo-Aware', 'whitening_method': 'hetero_geo_aware',        'whitening_config_name': 'hetero_geo_aware',
              'feature_rho': [0.5, 10.0, 1e6, 150.0]},
         ],
-        'baseline_variant': 'Identity (None)',
+        'baseline_variant': 'Hetero-Diagonal',
     },
     'beam_search': {
         'display_name': 'Beam Search',
@@ -382,12 +381,9 @@ def plot_comparison_variants(
         valid_sems = []
         valid_colors = []
         valid_names = []
-        valid_counts = []  # number of non-NaN observations
-        total_counts = []  # total directories for this variant
 
         for i, vname in enumerate(variant_names):
-            vdf_all = fdf[fdf['variant'] == vname][metric_col]
-            vdf = vdf_all.dropna()
+            vdf = fdf[fdf['variant'] == vname][metric_col].dropna()
             m = vdf.mean() if len(vdf) > 0 else np.nan
             if not np.isfinite(m):
                 continue
@@ -395,8 +391,6 @@ def plot_comparison_variants(
             valid_sems.append(vdf.sem() if len(vdf) > 1 else 0)
             valid_colors.append(COLOR_LIST[i % len(COLOR_LIST)])
             valid_names.append(vname)
-            valid_counts.append(len(vdf))
-            total_counts.append(len(vdf_all))
 
         if not valid_means:
             ax.set_visible(False)
@@ -412,16 +406,6 @@ def plot_comparison_variants(
                 bars[i].set_hatch('///')
                 bars[i].set_edgecolor('black')
                 bars[i].set_linewidth(0.8)
-
-        # Annotate bars with sample size when it differs from total
-        for i in range(len(valid_names)):
-            n, n_total = valid_counts[i], total_counts[i]
-            if n < n_total:
-                label = f'n={n}/{n_total}'
-            else:
-                label = f'n={n}'
-            ax.text(x[i], valid_means[i] + valid_sems[i], label,
-                    ha='center', va='bottom', fontsize=6, fontstyle='italic')
 
         ax.set_xticks(x)
         ax.set_xticklabels(valid_names, rotation=30, ha='right', fontsize=8)
