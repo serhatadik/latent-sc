@@ -473,17 +473,17 @@ class SionnaModel(PropagationModel):
         # This is the official Sionna approach per their tutorials
         terrain_mesh = terrain_obj.clone(as_mesh=True)
         
-        # CRITICAL: Elevate the measurement surface above the terrain!
-        # If measurement surface is at same position as terrain, rays hit terrain
-        # but never "hit" the measurement surface. 
-        # Elevate by receiver height to measure signal at receiver level.
+        # Elevate measurement surface to TX height above terrain.
+        # Grid points represent candidate TX locations at tx_height AGL.
+        # Virtual TX (sensor) is placed at rx_height AGL via reciprocity.
+        # This gives tx_height <-> rx_height path gains.
         from sionna.rt import transform_mesh
-        transform_mesh(terrain_mesh, translation=[0, 0, self.rx_height])
-        
+        transform_mesh(terrain_mesh, translation=[0, 0, self.tx_height])
+
         if verbose:
             if hasattr(terrain_mesh, 'face_count'):
                 print(f"[DEBUG] Terrain mesh face count: {terrain_mesh.face_count()}")
-            print(f"[DEBUG] Measurement surface elevated by {self.rx_height}m")
+            print(f"[DEBUG] Measurement surface elevated by {self.tx_height}m (TX height)")
 
 
 
@@ -561,18 +561,13 @@ class SionnaModel(PropagationModel):
                 
                 tx.position = [float(sx_local), float(sy_local), float(sz)]
                 
-                # Compute coverage
-                count_samples = self.config.get('num_samples', 10_000_000)
-                
-                # Use unified __call__ API with mesh argument
-                # Note: confirmed RadioMapSolver defaults to 1m resolution if cell_size not passed.
-                # Reverting to default (no cell_size).
+                # Compute coverage using config parameters
                 radio_map = solver(
-                    self.scene, 
-                    measurement_surface=terrain_mesh, 
-                    samples_per_tx=count_samples,
-                    diffraction=True, # Enable diffraction for terrain shadowing
-                    max_depth=5 # Ensure sufficient bounces/diffraction
+                    self.scene,
+                    measurement_surface=terrain_mesh,
+                    samples_per_tx=self.num_samples,
+                    diffraction=self.diffraction,
+                    max_depth=self.max_depth,
                 )
                 
                 # radio_map.path_gain is [num_tx, num_cells].
