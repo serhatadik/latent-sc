@@ -4,7 +4,7 @@
 frequency_hz: 3.534e9
 
 # Transmitter height in meters (for grid points)
-transmitter_height_m: 8.8
+transmitter_height_m: 10.0
 
 # Receiver height in meters (for sensors)
 receiver_height_m: 2.0
