@@ -99,7 +99,7 @@ BASELINE_CONFIG = {
     'pooling_lambda': 0.01,
     'save_visualization': False,
     'save_iterations': False,
-    'verbose': False,
+    'verbose': True,
 }
 
 # ===========================================================================
@@ -359,7 +359,18 @@ def main():
         help='Comma-separated factors to ablate (default: all). '
              'Options: whitening,beam_search,pool_refinement,physics_filters,'
              'hard_filtering,bic_selection,localization_model,reconstruction_model,'
-             'cross_model,cumulative'
+             'matched_model,cross_model,cumulative'
+    )
+    parser.add_argument(
+        '--variants', type=str, default=None,
+        help='Comma-separated variant names to run within selected factors '
+             '(e.g., "Ray Tracing" to run only that variant). Default: all variants.'
+    )
+    parser.add_argument(
+        '--merge-into', type=str, default=None,
+        help='Path to existing ablation output directory. New raw results are '
+             'appended to its ablation_raw_results.csv and summary/best CSVs '
+             'are regenerated.'
     )
     parser.add_argument(
         '--tx-counts', type=str, default=None,
@@ -450,6 +461,11 @@ def main():
         selected_factors = [f for f in selected_factors if f in all_factor_keys]
     else:
         selected_factors = all_factor_keys
+
+    # -- Parse variant filter --
+    variant_filter = None
+    if args.variants:
+        variant_filter = [v.strip() for v in args.variants.split(',')]
 
     # Update baseline models (specific flags override --baseline-model)
     baseline_loc_model = args.baseline_localization_model or args.baseline_model
@@ -552,6 +568,8 @@ def main():
         finfo = ABLATION_FACTORS[factor_name]
         for variant in finfo['variants']:
             vname = variant['name']
+            if variant_filter and vname not in variant_filter:
+                continue
             overrides = {k: v for k, v in variant.items() if k != 'name'}
             experiment_config = _build_experiment_config(BASELINE_CONFIG, overrides)
 
@@ -604,6 +622,21 @@ def main():
 
     all_results = []
     start_time = time.time()
+    checkpoint_csv = output_dir / 'ablation_raw_results_checkpoint.csv'
+    last_checkpoint_count = 0
+    CHECKPOINT_INTERVAL = 50  # flush to disk every N completed tasks
+
+    def _flush_checkpoint(results_list, completed_count, total_count):
+        """Write incremental checkpoint of raw results to disk."""
+        nonlocal last_checkpoint_count
+        if len(results_list) == last_checkpoint_count:
+            return  # nothing new to write
+        df = pd.DataFrame(results_list)
+        df.to_csv(checkpoint_csv, index=False)
+        last_checkpoint_count = len(results_list)
+        elapsed = time.time() - start_time
+        print(f"  >> Checkpoint saved: {len(results_list)} results "
+              f"({completed_count}/{total_count} tasks, {elapsed/60:.1f}min)")
 
     if n_workers <= 1:
         # Sequential execution
@@ -621,6 +654,9 @@ def main():
 
             results = _run_variant_for_directory(task_args)
             all_results.extend(results)
+
+            if (i + 1) % CHECKPOINT_INTERVAL == 0:
+                _flush_checkpoint(all_results, i + 1, total_tasks)
     else:
         print(f"  Using {n_workers} parallel workers...")
         with ProcessPoolExecutor(max_workers=n_workers, initializer=_worker_init) as executor:
@@ -634,11 +670,17 @@ def main():
                 except Exception as e:
                     print(f"  Task failed: {e}")
 
-                if completed % 50 == 0:
+                if completed % 10 == 0 or completed <= 5:
                     elapsed = time.time() - start_time
                     print(f"  Completed {completed}/{total_tasks} tasks "
                           f"({elapsed/60:.1f}min elapsed, "
                           f"{len(all_results)} results collected)")
+
+                if completed % CHECKPOINT_INTERVAL == 0:
+                    _flush_checkpoint(all_results, completed, total_tasks)
+
+    # Final checkpoint before aggregation
+    _flush_checkpoint(all_results, total_tasks, total_tasks)
 
     elapsed_total = time.time() - start_time
     print(f"\nAll experiments completed in {elapsed_total/60:.1f} minutes")
@@ -654,6 +696,32 @@ def main():
     print("-" * 70)
 
     raw_df = pd.DataFrame(all_results)
+
+    # -- Merge into existing results if requested --
+    merge_dir = Path(args.merge_into) if args.merge_into else None
+    if merge_dir:
+        existing_raw_csv = merge_dir / 'ablation_raw_results.csv'
+        if existing_raw_csv.exists():
+            # Back up existing results before overwriting
+            backup_csv = merge_dir / 'ablation_raw_results.backup.csv'
+            import shutil
+            shutil.copy2(existing_raw_csv, backup_csv)
+            print(f"  Backed up existing results to {backup_csv}")
+
+            existing_df = pd.read_csv(existing_raw_csv)
+            # Remove existing rows that overlap with new results to avoid duplicates
+            dedup_keys = ['factor', 'variant', 'dir_name', 'strategy']
+            new_keys = raw_df[dedup_keys].apply(tuple, axis=1)
+            existing_keys = existing_df[dedup_keys].apply(tuple, axis=1)
+            existing_df = existing_df[~existing_keys.isin(set(new_keys))]
+            print(f"  Merging {len(raw_df)} new rows into {len(existing_df)} existing rows "
+                  f"(dropped {len(existing_keys) - len(existing_df)} overlapping rows)")
+            raw_df = pd.concat([existing_df, raw_df], ignore_index=True)
+        else:
+            print(f"  Warning: {existing_raw_csv} not found, writing new results only")
+        # Redirect output to the merge target directory
+        output_dir = merge_dir
+
     raw_csv_path = output_dir / 'ablation_raw_results.csv'
     raw_df.to_csv(raw_csv_path, index=False)
     print(f"  Raw results saved: {raw_csv_path} ({len(raw_df)} rows)")
