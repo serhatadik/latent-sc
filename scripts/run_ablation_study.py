@@ -26,6 +26,7 @@ os.environ['OPENBLAS_NUM_THREADS'] = '1'
 os.environ['NUMEXPR_NUM_THREADS'] = '1'
 
 import sys
+import re
 import copy
 import time
 import argparse
@@ -343,6 +344,75 @@ def _select_best_per_directory(results_df: pd.DataFrame) -> pd.DataFrame:
     return results_df.loc[best_indices].reset_index(drop=True)
 
 
+def _build_name_signature(args) -> str:
+    """Build the non-timestamp portion of the output directory name from CLI args."""
+    sig_parts = []
+    if args.factors:
+        sig_parts.append(f'factors_{args.factors.replace(",", "-")}')
+    if args.tx_counts:
+        sig_parts.append(f'tx_{args.tx_counts.replace(",", "-")}')
+    if args.nloc is not None:
+        sig_parts.append(f'nloc_{args.nloc}')
+    if args.max_dirs is not None:
+        sig_parts.append(f'maxdirs_{args.max_dirs}')
+    loc_model = args.baseline_localization_model or args.baseline_model
+    recon_model = args.baseline_reconstruction_model or args.baseline_model
+    if loc_model == recon_model:
+        if loc_model != 'tirem':
+            sig_parts.append(f'model_{loc_model}')
+    else:
+        sig_parts.append(f'loc_{loc_model}_recon_{recon_model}')
+    if args.eta != 0.1:
+        sig_parts.append(f'eta_{args.eta}')
+    if args.test:
+        sig_parts.append('test')
+    return '_'.join(sig_parts)
+
+
+def _find_resumable_study(name_signature: str, results_base: Path):
+    """
+    Find an incomplete ablation study directory matching the given argument signature.
+
+    An incomplete study has a checkpoint CSV but no final results CSV.
+    If multiple matches exist, returns the one with the most checkpoint rows.
+
+    Returns (output_dir, checkpoint_df) or (None, None).
+    """
+    if not results_base.exists():
+        return None, None
+
+    pattern = re.compile(r'^ablation_study_\d{8}_\d{6}(?:_(.+))?$')
+    candidates = []
+
+    for d in results_base.iterdir():
+        if not d.is_dir():
+            continue
+        m = pattern.match(d.name)
+        if not m:
+            continue
+
+        dir_sig = m.group(1) or ''
+        if dir_sig != name_signature:
+            continue
+
+        checkpoint = d / 'ablation_raw_results_checkpoint.csv'
+        final = d / 'ablation_raw_results.csv'
+
+        if checkpoint.exists() and not final.exists():
+            try:
+                df = pd.read_csv(checkpoint)
+                candidates.append((d, df, len(df)))
+            except Exception:
+                continue
+
+    if not candidates:
+        return None, None
+
+    # Pick the one with the most rows
+    candidates.sort(key=lambda x: x[2], reverse=True)
+    return candidates[0][0], candidates[0][1]
+
+
 # ===========================================================================
 # Main
 # ===========================================================================
@@ -413,33 +483,30 @@ def main():
     )
     args = parser.parse_args()
 
-    # -- Output directory --
+    # -- Output directory (with auto-resume for incomplete studies) --
+    resumed_results = []
     if args.output_dir:
         output_dir = Path(args.output_dir)
     else:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        # Encode CLI args into directory name
-        name_parts = [f'ablation_study_{timestamp}']
-        if args.factors:
-            name_parts.append(f'factors_{args.factors.replace(",", "-")}')
-        if args.tx_counts:
-            name_parts.append(f'tx_{args.tx_counts.replace(",", "-")}')
-        if args.nloc is not None:
-            name_parts.append(f'nloc_{args.nloc}')
-        if args.max_dirs is not None:
-            name_parts.append(f'maxdirs_{args.max_dirs}')
-        loc_model = args.baseline_localization_model or args.baseline_model
-        recon_model = args.baseline_reconstruction_model or args.baseline_model
-        if loc_model == recon_model:
-            if loc_model != 'tirem':
-                name_parts.append(f'model_{loc_model}')
+        name_signature = _build_name_signature(args)
+
+        # Check for an incomplete study with matching arguments to resume
+        resume_dir = None
+        if not args.merge_into:
+            resume_dir, resume_df = _find_resumable_study(name_signature, Path('results'))
+
+        if resume_dir is not None:
+            output_dir = resume_dir
+            resumed_results = resume_df.to_dict('records')
+            print(f"\n  Resuming incomplete study: {output_dir}")
+            print(f"  Loaded {len(resumed_results)} existing results from checkpoint")
         else:
-            name_parts.append(f'loc_{loc_model}_recon_{recon_model}')
-        if args.eta != 0.1:
-            name_parts.append(f'eta_{args.eta}')
-        if args.test:
-            name_parts.append('test')
-        output_dir = Path('results') / '_'.join(name_parts)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            # Encode CLI args into directory name
+            name_parts = [f'ablation_study_{timestamp}']
+            if name_signature:
+                name_parts.append(name_signature)
+            output_dir = Path('results') / '_'.join(name_parts)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # -- Parse filters --
@@ -607,6 +674,18 @@ def main():
                     str(output_dir), args.test,
                 ))
 
+    # -- Filter already-completed tasks when resuming --
+    if resumed_results:
+        completed_keys = {
+            (r['factor'], r['variant'], r['dir_name'])
+            for r in resumed_results
+        }
+        original_count = len(tasks)
+        tasks = [t for t in tasks
+                 if (t[5], t[6], t[0]['name']) not in completed_keys]
+        print(f"  Resuming: {original_count - len(tasks)} tasks already done, "
+              f"{len(tasks)} remaining")
+
     total_tasks = len(tasks)
     print(f"  Total experiment tasks: {total_tasks}")
 
@@ -620,10 +699,10 @@ def main():
         n_workers = max(1, os.cpu_count() - 1)
     n_workers = min(n_workers, total_tasks)
 
-    all_results = []
+    all_results = list(resumed_results)
     start_time = time.time()
     checkpoint_csv = output_dir / 'ablation_raw_results_checkpoint.csv'
-    last_checkpoint_count = 0
+    last_checkpoint_count = len(all_results)
     CHECKPOINT_INTERVAL = 50  # flush to disk every N completed tasks
 
     def _flush_checkpoint(results_list, completed_count, total_count):
