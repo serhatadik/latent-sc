@@ -96,6 +96,8 @@ BASELINE_CONFIG = {
     'combo_max_power_diff_dB': 20.0,
     'combo_sensor_proximity_threshold_m': 100.0,
     'combo_sensor_proximity_penalty': 10.0,
+    # Per-TX exponent refit
+    'per_tx_refit': True,
     # Misc
     'pooling_lambda': 0.01,
     'save_visualization': False,
@@ -314,6 +316,7 @@ def _build_experiment_config(baseline: dict, overrides: dict) -> dict:
         'rmse_threshold': cfg['rmse_threshold'],
         'max_error_threshold': cfg['max_error_threshold'],
         'skip_bic_selection': cfg['skip_bic_selection'],
+        'per_tx_refit': cfg['per_tx_refit'],
     }
     return experiment_params
 

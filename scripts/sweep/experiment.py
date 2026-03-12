@@ -390,6 +390,7 @@ def run_single_experiment(
     rmse_threshold: float = 20.0,
     max_error_threshold: float = 38.0,
     skip_bic_selection: bool = False,
+    per_tx_refit: bool = True,
 ) -> Optional[Dict]:
     """
     Run a single reconstruction experiment.
@@ -642,7 +643,7 @@ def run_single_experiment(
                             info['solver_info']['combination_rmse'] = recomp_rmse
 
                     # Step 5.5: Per-TX exponent refit (log_distance reconstruction only)
-                    if recon_model_type == 'log_distance' and len(optimal_combo) > 0:
+                    if per_tx_refit and recon_model_type == 'log_distance' and len(optimal_combo) > 0:
                         per_tx_exp, _refit_gains, refit_powers, refit_rmse, \
                             refit_mae, refit_max_err, refit_total = \
                             refit_with_per_tx_exponents(

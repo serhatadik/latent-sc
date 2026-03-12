@@ -98,6 +98,15 @@ ABLATION_FACTORS = {
         ],
         'baseline_variant': 'TIREM',
     },
+    'per_tx_refit': {
+        'display_name': 'Per-TX Exponent Refit',
+        'type': 'binary',
+        'variants': [
+            {'name': 'Disabled (Global n)', 'per_tx_refit': False},
+            {'name': 'Enabled (Fitted n)',  'per_tx_refit': True},
+        ],
+        'baseline_variant': 'Enabled (Fitted n)',
+    },
     'matched_model': {
         'display_name': 'Matched Model (Loc=Recon)',
         'type': 'comparison',
