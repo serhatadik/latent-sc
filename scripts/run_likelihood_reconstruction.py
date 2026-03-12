@@ -1089,11 +1089,242 @@ def main():
     for status, count in status_counts.items():
         print(f"    {status}: {count}")
 
+    # --- Generate plots ---
+    print(f"\n{'='*70}")
+    print("Generating plots...")
+    print(f"{'='*70}")
+    try:
+        generate_likelihood_plots(raw_df, output_dir, args.model_type)
+    except Exception as e:
+        print(f"  Plot generation failed: {e}")
+
     print(f"\n{'='*70}")
     print(f"Likelihood reconstruction complete!")
     print(f"  Results: {output_dir}")
     print(f"  Runtime: {elapsed_total/60:.1f} minutes")
     print(f"{'='*70}")
+
+
+# ---------------------------------------------------------------------------
+# Plotting
+# ---------------------------------------------------------------------------
+
+def generate_likelihood_plots(raw_df: pd.DataFrame, output_dir: Path,
+                              model_type: str):
+    """
+    Generate publication-quality bar plots summarizing likelihood reconstruction
+    performance, grouped by TX count.
+
+    Produces:
+      1. Reconstruction metrics by TX count (RMSE, MAE, Bias, Max Error)
+      2. Box plots of RMSE and MAE distributions by TX count
+    """
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    success_df = raw_df[raw_df['recon_status'] == 'success'].copy()
+    if success_df.empty:
+        print("  No successful results to plot.")
+        return
+
+    plots_dir = output_dir / 'plots'
+    plots_dir.mkdir(parents=True, exist_ok=True)
+
+    # Publication style (matching ablation_plotting.py)
+    plt.rcParams.update({
+        'font.family': 'serif',
+        'font.size': 10,
+        'axes.labelsize': 11,
+        'axes.titlesize': 12,
+        'xtick.labelsize': 9,
+        'ytick.labelsize': 9,
+        'legend.fontsize': 9,
+        'figure.dpi': 300,
+        'savefig.dpi': 300,
+        'savefig.bbox': 'tight',
+        'savefig.pad_inches': 0.05,
+        'axes.grid': True,
+        'grid.alpha': 0.3,
+        'grid.linewidth': 0.5,
+        'axes.spines.top': False,
+        'axes.spines.right': False,
+        'axes.linewidth': 0.8,
+        'errorbar.capsize': 3,
+    })
+
+    COLORS = {
+        'blue':   '#0072B2',
+        'orange': '#E69F00',
+        'green':  '#009E73',
+        'red':    '#D55E00',
+        'purple': '#CC79A7',
+        'cyan':   '#56B4E9',
+    }
+    color_list = list(COLORS.values())
+
+    tx_counts = sorted(success_df['tx_count'].unique())
+
+    def _save(fig, name):
+        fig.savefig(plots_dir / f'{name}.pdf', format='pdf')
+        fig.savefig(plots_dir / f'{name}.png', format='png')
+        plt.close(fig)
+
+    # --- Figure 1: Bar chart of reconstruction metrics by TX count ---
+    metrics = [
+        ('recon_rmse', 'RMSE (dB)'),
+        ('recon_mae', 'MAE (dB)'),
+        ('recon_bias', 'Bias (dB)'),
+        ('recon_max_error', 'Max Error (dB)'),
+    ]
+
+    fig, axes = plt.subplots(1, len(metrics), figsize=(7.5, 3.0))
+    x = np.arange(len(tx_counts))
+    bar_width = 0.6
+
+    for ax_idx, (metric_col, metric_label) in enumerate(metrics):
+        ax = axes[ax_idx]
+        means = []
+        sems = []
+        for tc in tx_counts:
+            vals = success_df[success_df['tx_count'] == tc][metric_col].dropna()
+            means.append(vals.mean() if len(vals) > 0 else np.nan)
+            sems.append(vals.sem() if len(vals) > 1 else 0)
+
+        bars = ax.bar(x, means, bar_width, yerr=sems,
+                      color=[color_list[i % len(color_list)] for i in range(len(tx_counts))],
+                      capsize=3, edgecolor='white', linewidth=0.5)
+
+        # Value labels on bars
+        for i, (m, s) in enumerate(zip(means, sems)):
+            if np.isfinite(m):
+                ax.text(i, m + s + 0.3, f'{m:.1f}', ha='center', va='bottom',
+                        fontsize=7, fontweight='bold')
+
+        ax.set_xticks(x)
+        ax.set_xticklabels([str(tc) for tc in tx_counts])
+        ax.set_xlabel('TX Count')
+        ax.set_ylabel(metric_label)
+
+    fig.suptitle(f'Likelihood Reconstruction Performance by TX Count\n'
+                 f'Model: {model_type}',
+                 fontsize=12, fontweight='bold', y=1.08)
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    _save(fig, 'likelihood_metrics_by_tx_count')
+
+    # --- Figure 2: Box plots of RMSE and MAE by TX count ---
+    box_metrics = [
+        ('recon_rmse', 'RMSE (dB)'),
+        ('recon_mae', 'MAE (dB)'),
+        ('recon_bias', 'Bias (dB)'),
+    ]
+
+    fig, axes = plt.subplots(1, len(box_metrics), figsize=(7.5, 3.5))
+
+    for ax_idx, (metric_col, metric_label) in enumerate(box_metrics):
+        ax = axes[ax_idx]
+        data_by_tc = []
+        labels = []
+        for tc in tx_counts:
+            vals = success_df[success_df['tx_count'] == tc][metric_col].dropna()
+            if len(vals) > 0:
+                data_by_tc.append(vals.values)
+                labels.append(str(tc))
+
+        if data_by_tc:
+            bp = ax.boxplot(data_by_tc, labels=labels, patch_artist=True,
+                            widths=0.5, showfliers=True,
+                            flierprops=dict(marker='o', markersize=3, alpha=0.5))
+            for i, patch in enumerate(bp['boxes']):
+                patch.set_facecolor(color_list[i % len(color_list)])
+                patch.set_alpha(0.7)
+            for median in bp['medians']:
+                median.set_color('black')
+                median.set_linewidth(1.5)
+
+        ax.set_xlabel('TX Count')
+        ax.set_ylabel(metric_label)
+
+    fig.suptitle(f'Likelihood Reconstruction Distribution by TX Count\n'
+                 f'Model: {model_type}  |  N={len(success_df)} directories',
+                 fontsize=12, fontweight='bold', y=1.08)
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    _save(fig, 'likelihood_boxplots_by_tx_count')
+
+    # --- Figure 3: Per-directory RMSE scatter (sorted) ---
+    fig, ax = plt.subplots(figsize=(7.5, 3.5))
+    sorted_df = success_df.sort_values('recon_rmse').reset_index(drop=True)
+    colors = [color_list[int(tc) - 1] if int(tc) <= len(color_list)
+              else color_list[-1] for tc in sorted_df['tx_count']]
+    ax.bar(range(len(sorted_df)), sorted_df['recon_rmse'],
+           color=colors, edgecolor='none', width=1.0)
+
+    # Add legend for TX counts
+    from matplotlib.patches import Patch
+    legend_elements = [Patch(facecolor=color_list[i], label=f'TX={tc}')
+                       for i, tc in enumerate(tx_counts)
+                       if i < len(color_list)]
+    ax.legend(handles=legend_elements, fontsize=8, loc='upper left')
+
+    # Horizontal reference lines
+    overall_mean = sorted_df['recon_rmse'].mean()
+    overall_median = sorted_df['recon_rmse'].median()
+    ax.axhline(overall_mean, color='black', linestyle='--', linewidth=0.8,
+               label=f'Mean={overall_mean:.1f}')
+    ax.axhline(overall_median, color='gray', linestyle=':', linewidth=0.8,
+               label=f'Median={overall_median:.1f}')
+    ax.text(len(sorted_df) * 0.98, overall_mean + 0.3, f'Mean={overall_mean:.1f}',
+            ha='right', va='bottom', fontsize=8)
+    ax.text(len(sorted_df) * 0.98, overall_median - 0.3, f'Median={overall_median:.1f}',
+            ha='right', va='top', fontsize=8, color='gray')
+
+    ax.set_xlabel('Directory (sorted by RMSE)')
+    ax.set_ylabel('Reconstruction RMSE (dB)')
+    ax.set_title(f'Per-Directory Reconstruction RMSE  |  Model: {model_type}',
+                 fontsize=12, fontweight='bold')
+    ax.set_xlim(-0.5, len(sorted_df) - 0.5)
+    fig.tight_layout()
+    _save(fig, 'likelihood_rmse_per_directory')
+
+    # --- Figure 4: Aggregate box plot across all directories ---
+    agg_metrics = [
+        ('recon_rmse', 'RMSE (dB)'),
+        ('recon_mae', 'MAE (dB)'),
+        ('recon_bias', 'Bias (dB)'),
+        ('recon_max_error', 'Max Error (dB)'),
+    ]
+    agg_colors = [COLORS['blue'], COLORS['orange'], COLORS['green'], COLORS['red']]
+
+    fig, ax = plt.subplots(figsize=(5.0, 3.5))
+    data_list = []
+    labels = []
+    for metric_col, metric_label in agg_metrics:
+        vals = success_df[metric_col].dropna().values
+        data_list.append(vals)
+        labels.append(metric_label)
+
+    bp = ax.boxplot(data_list, labels=labels, patch_artist=True,
+                    widths=0.5, showfliers=True,
+                    flierprops=dict(marker='o', markersize=3, alpha=0.5))
+    for i, patch in enumerate(bp['boxes']):
+        patch.set_facecolor(agg_colors[i])
+        patch.set_alpha(0.7)
+    for median in bp['medians']:
+        median.set_color('black')
+        median.set_linewidth(1.5)
+
+    ax.axhline(0, color='black', linewidth=0.5, linestyle='-')
+    ax.yaxis.set_major_locator(plt.MultipleLocator(5))
+    ax.yaxis.set_minor_locator(plt.MultipleLocator(2.5))
+    ax.tick_params(axis='y', which='minor', length=2)
+    ax.set_ylabel('Value (dB)')
+    ax.set_title(f'Aggregate Reconstruction Performance\n'
+                 f'Model: {model_type}  |  N={len(success_df)} directories',
+                 fontsize=12, fontweight='bold')
+    fig.tight_layout()
+    _save(fig, 'likelihood_aggregate_performance')
+
+    print(f"  Plots saved to: {plots_dir}")
 
 
 if __name__ == '__main__':
