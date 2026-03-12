@@ -822,6 +822,7 @@ def run_single_experiment(
             save_plot=save_visualization,  # Generate validation plots when visualizations enabled
             true_tx_locations=tx_locations,  # For spatial plot visualization
             per_tx_exponents=info.get('solver_info', {}).get('per_tx_exponents'),
+            np_exponent=config['localization']['path_loss_exponent'],
         )
 
         return {

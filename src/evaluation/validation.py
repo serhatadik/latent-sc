@@ -77,8 +77,9 @@ class ReconstructionValidator:
         print(f"Loaded observed powers: {self.observed_powers_dBm.shape} samples")
         return self.observed_powers_dBm
 
-    def get_propagation_matrix(self, model_type, model_config_path, scale=1.0, 
-                             cache_dir='../data/cache', n_jobs=-1, verbose=True):
+    def get_propagation_matrix(self, model_type, model_config_path, scale=1.0,
+                             cache_dir='../data/cache', n_jobs=-1, verbose=True,
+                             np_exponent=2):
         """
         Get or compute the propagation matrix (A_val) for the validation set.
         
@@ -112,7 +113,8 @@ class ReconstructionValidator:
         hasher.update(str(self.map_data['shape']).encode('utf-8'))
         hasher.update(str(scale).encode('utf-8'))
         hasher.update(model_type.encode('utf-8'))
-        
+        hasher.update(str(np_exponent).encode('utf-8'))
+
         if model_config_path:
             with open(model_config_path, 'rb') as f:
                 hasher.update(f.read())
@@ -141,6 +143,7 @@ class ReconstructionValidator:
             scale=scale,
             model_type=model_type,
             config_path=model_config_path,
+            np_exponent=np_exponent,
             n_jobs=n_jobs,
             verbose=verbose
         )

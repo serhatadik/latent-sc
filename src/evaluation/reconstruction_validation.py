@@ -610,6 +610,7 @@ def compute_reconstruction_error(
     save_plot: bool = False,
     true_tx_locations: Optional[Dict] = None,
     per_tx_exponents: Optional[List[float]] = None,
+    np_exponent: float = 2,
 ) -> Dict:
     """
     Compute reconstruction error metrics for a given TX estimate.
@@ -747,7 +748,8 @@ def compute_reconstruction_error(
                 model_config_path=model_config_path,
                 scale=scale,
                 cache_dir=str(cache_dir),
-                verbose=verbose
+                verbose=verbose,
+                np_exponent=np_exponent,
             )
 
             tx_map_linear = np.zeros((height, width), dtype=np.float64)
