@@ -14,6 +14,13 @@ The likelihood method:
   4. Marginalizes over all hypotheses to predict received power at validation points
 """
 
+# Threading env vars BEFORE numpy (Windows deadlock prevention)
+import os
+os.environ['OMP_NUM_THREADS'] = '1'
+os.environ['MKL_NUM_THREADS'] = '1'
+os.environ['OPENBLAS_NUM_THREADS'] = '1'
+os.environ['NUMEXPR_NUM_THREADS'] = '1'
+
 import argparse
 import io
 import sys
@@ -702,11 +709,25 @@ def run_likelihood_experiment(
 # Worker wrapper (for ProcessPoolExecutor)
 # ---------------------------------------------------------------------------
 
+def _worker_init():
+    """Initialize worker process."""
+    os.environ['OMP_NUM_THREADS'] = '1'
+    os.environ['MKL_NUM_THREADS'] = '1'
+    os.environ['OPENBLAS_NUM_THREADS'] = '1'
+    os.environ['NUMEXPR_NUM_THREADS'] = '1'
+
+
 def _worker(args_tuple):
     """Unpack arguments and run a single experiment."""
-    (data_info, config, map_data, model_type, sigma, delta_c,
-     pmf_threshold, verbose, save_plots, plot_output_dir, all_tx_locations,
-     fit_exponent) = args_tuple
+    (data_info_ser, config, map_data, model_type, sigma, delta_c,
+     pmf_threshold, verbose, save_plots, plot_output_dir_str,
+     all_tx_locations, fit_exponent) = args_tuple
+
+    # Reconstruct non-serializable objects
+    data_info = data_info_ser.copy()
+    data_info['path'] = Path(data_info['path_str'])
+    plot_output_dir = Path(plot_output_dir_str) if plot_output_dir_str else None
+
     return run_likelihood_experiment(
         data_info=data_info,
         config=config,
@@ -762,7 +783,7 @@ def main():
     )
     parser.add_argument(
         '--workers', type=int, default=1,
-        help='Parallel workers (default: 1)',
+        help='Parallel workers (default: 1, -1 = all CPUs minus 1)',
     )
     parser.add_argument(
         '--output-dir', type=str, default=None,
@@ -877,13 +898,59 @@ def main():
     print(f"Running {total_dirs} experiments...")
     print(f"{'='*70}\n")
 
+    n_workers = args.workers
+    if n_workers == -1:
+        n_workers = max(1, os.cpu_count() - 1)
+    n_workers = min(n_workers, total_dirs)
+
     start_time = time.time()
     all_results = []
-    completed = 0
+    checkpoint_csv = output_dir / 'likelihood_raw_results_checkpoint.csv'
+    last_checkpoint_count = 0
+    CHECKPOINT_INTERVAL = 20
 
-    if args.workers <= 1:
+    def _flush_checkpoint(results_list, completed_count, total_count):
+        """Write incremental checkpoint of raw results to disk."""
+        nonlocal last_checkpoint_count
+        if len(results_list) == last_checkpoint_count:
+            return
+        df = pd.DataFrame(results_list)
+        df.to_csv(checkpoint_csv, index=False)
+        last_checkpoint_count = len(results_list)
+        elapsed = time.time() - start_time
+        print(f"  >> Checkpoint saved: {len(results_list)} results "
+              f"({completed_count}/{total_count} tasks, {elapsed/60:.1f}min)")
+
+    def _log_result(result, dir_name, completed_count, total_count):
+        status = result['recon_status'] if result else 'failed'
+        rmse_str = (f"{result['recon_rmse']:.1f}"
+                    if result and np.isfinite(result.get('recon_rmse', np.nan))
+                    else 'N/A')
+        print(f"  [{completed_count:4d}/{total_count}] {dir_name:<50s}  "
+              f"RMSE={rmse_str:>6s} dB  ({status})")
+
+    # Serialize data_info dicts (Path objects aren't picklable)
+    all_dirs_ser = []
+    for d in all_dirs:
+        d_ser = {
+            'name': d['name'],
+            'transmitters': d['transmitters'],
+            'num_locations': d.get('num_locations'),
+            'seed': d['seed'],
+            'path_str': str(d['path']),
+        }
+        all_dirs_ser.append(d_ser)
+
+    if n_workers <= 1:
         # Sequential
         for i, data_info in enumerate(all_dirs):
+            if (i + 1) % 10 == 0 or i == 0:
+                elapsed = time.time() - start_time
+                rate = (i + 1) / elapsed if elapsed > 0 else 0
+                remaining = (total_dirs - i - 1) / rate / 60 if rate > 0 else 0
+                print(f"  --- {elapsed/60:.1f}min elapsed, "
+                      f"~{remaining:.1f}min remaining ---")
+
             result = run_likelihood_experiment(
                 data_info=data_info,
                 config=config,
@@ -900,35 +967,47 @@ def main():
             )
             if result is not None:
                 all_results.append(result)
-            completed += 1
-            status = result['recon_status'] if result else 'failed'
-            rmse_str = f"{result['recon_rmse']:.1f}" if result and np.isfinite(result.get('recon_rmse', np.nan)) else 'N/A'
-            print(f"  [{completed:4d}/{total_dirs}] {data_info['name']:<50s}  "
-                  f"RMSE={rmse_str:>6s} dB  ({status})")
+            _log_result(result, data_info['name'], i + 1, total_dirs)
+
+            if (i + 1) % CHECKPOINT_INTERVAL == 0:
+                _flush_checkpoint(all_results, i + 1, total_dirs)
     else:
         # Parallel
+        print(f"  Using {n_workers} parallel workers...")
         task_args = [
-            (di, config, map_data, args.model_type, args.sigma, args.delta_c,
-             args.pmf_threshold, args.verbose, args.save_plots, output_dir, all_tx_locations,
-             args.fit_exponent)
-            for di in all_dirs
+            (d_ser, config, map_data, args.model_type, args.sigma, args.delta_c,
+             args.pmf_threshold, args.verbose, args.save_plots, str(output_dir),
+             all_tx_locations, args.fit_exponent)
+            for d_ser in all_dirs_ser
         ]
-        with ProcessPoolExecutor(max_workers=args.workers) as executor:
-            futures = {executor.submit(_worker, ta): ta[0] for ta in task_args}
+        with ProcessPoolExecutor(max_workers=n_workers,
+                                 initializer=_worker_init) as executor:
+            futures = {executor.submit(_worker, ta): ta[0]['name']
+                       for ta in task_args}
+            completed = 0
             for future in as_completed(futures):
-                data_info = futures[future]
+                dir_name = futures[future]
+                completed += 1
                 try:
                     result = future.result()
                 except Exception as e:
                     result = None
-                    print(f"  Worker exception for {data_info['name']}: {e}")
+                    print(f"  Worker exception for {dir_name}: {e}")
                 if result is not None:
                     all_results.append(result)
-                completed += 1
-                status = result['recon_status'] if result else 'failed'
-                rmse_str = f"{result['recon_rmse']:.1f}" if result and np.isfinite(result.get('recon_rmse', np.nan)) else 'N/A'
-                print(f"  [{completed:4d}/{total_dirs}] {data_info['name']:<50s}  "
-                      f"RMSE={rmse_str:>6s} dB  ({status})")
+                _log_result(result, dir_name, completed, total_dirs)
+
+                if completed % 10 == 0 or completed <= 5:
+                    elapsed = time.time() - start_time
+                    print(f"  --- {completed}/{total_dirs} tasks, "
+                          f"{elapsed/60:.1f}min elapsed, "
+                          f"{len(all_results)} results collected ---")
+
+                if completed % CHECKPOINT_INTERVAL == 0:
+                    _flush_checkpoint(all_results, completed, total_dirs)
+
+    # Final checkpoint
+    _flush_checkpoint(all_results, total_dirs, total_dirs)
 
     elapsed_total = time.time() - start_time
     print(f"\nAll experiments completed in {elapsed_total/60:.1f} minutes")
