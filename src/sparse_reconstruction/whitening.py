@@ -140,6 +140,10 @@ def compute_whitening_matrix(cov_matrix=None, method='cholesky', regularization=
         if observed_powers is None:
             raise ValueError("observed_powers must be provided for method='log_inv_power_diag'")
         W = _whitening_diagonal_observation(observed_powers, M, verbose)
+    elif method == 'homo_diag':
+        if observed_powers is None:
+            raise ValueError("observed_powers must be provided for method='homo_diag'")
+        W = _whitening_homo_diag(observed_powers, M, sigma_noise, eta, verbose)
     elif method == 'hetero_diag':
         if observed_powers is None:
             raise ValueError("observed_powers must be provided for method='hetero_diag'")
@@ -151,7 +155,7 @@ def compute_whitening_matrix(cov_matrix=None, method='cholesky', regularization=
             raise ValueError("observed_stds_dB must be provided for method='hetero_diag_obs'")
         W = _whitening_hetero_diag_obs(observed_powers, observed_stds_dB, M, sigma_noise_floor, verbose)
     else:
-        raise ValueError(f"Unknown method: {method}. Choose 'cholesky', 'svd', 'eig', 'log_inv_power_diag', 'hetero_diag', or 'hetero_diag_obs'")
+        raise ValueError(f"Unknown method: {method}. Choose 'cholesky', 'svd', 'eig', 'log_inv_power_diag', 'homo_diag', 'hetero_diag', or 'hetero_diag_obs'")
 
     # Validate result (only if cov_matrix was used/provided)
     if verbose and cov_matrix is not None and method not in ['log_inv_power_diag', 'hetero_diag']:
@@ -163,6 +167,49 @@ def compute_whitening_matrix(cov_matrix=None, method='cholesky', regularization=
                 f"Whitening error is large ({error:.2e}). "
                 "Check covariance matrix conditioning."
             )
+
+    return W
+
+
+def _whitening_homo_diag(observed_powers, M, sigma_noise=1e-13, eta=0.5, verbose=True):
+    """
+    Compute homoscedastic diagonal whitening matrix.
+
+    Like hetero_diag, but uses the mean power across all sensors so that
+    every diagonal element is identical:
+
+        v = sigma_noise^2 + (eta * mean(p))^2
+        W = diag(1 / sqrt(v))  =  (1/sqrt(v)) * I
+
+    Parameters
+    ----------
+    observed_powers : ndarray
+        Observed powers in linear scale (mW)
+    M : int
+        Number of sensors
+    sigma_noise : float
+        Noise floor variance
+    eta : float
+        Scaling factor for signal-dependent variance
+    verbose : bool
+        Print info
+
+    Returns
+    -------
+    W : ndarray
+        Whitening matrix (scalar multiple of identity)
+    """
+    mean_power = np.mean(observed_powers)
+    v = sigma_noise**2 + (eta * mean_power)**2
+    w_val = 1.0 / np.sqrt(v)
+    W = w_val * np.eye(M)
+
+    if verbose:
+        print(f"  Homoscedastic diagonal whitening:")
+        print(f"    sigma_noise: {sigma_noise:.2e}, eta: {eta:.2f}")
+        print(f"    mean_power: {mean_power:.2e}")
+        print(f"    V_diag (uniform): {v:.2e}")
+        print(f"    W_diag (uniform): {w_val:.2e}")
 
     return W
 

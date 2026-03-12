@@ -26,6 +26,7 @@ ABLATION_FACTORS = {
         'display_name': 'Whitening Method',
         'type': 'comparison',
         'variants': [
+            {'name': 'Homo-Diagonal',    'whitening_method': 'homo_diag',              'whitening_config_name': 'homo_diag'},
             {'name': 'Homo-Spatial',     'whitening_method': 'spatial_corr_exp_decay',  'whitening_config_name': 'homo_spatial'},
             {'name': 'Hetero-Diagonal',  'whitening_method': 'hetero_diag',            'whitening_config_name': 'hetero_diag'},
             {'name': 'Hetero-Spatial',   'whitening_method': 'hetero_spatial',          'whitening_config_name': 'hetero_spatial'},

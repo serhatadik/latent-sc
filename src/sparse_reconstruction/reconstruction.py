@@ -96,7 +96,7 @@ def joint_sparse_reconstruction(sensor_locations, observed_powers_dBm, map_shape
 
     spatial_weights = None
     # Handle diagonal whitening methods based on observations
-    if whitening_method in ['hetero_diag', 'log_inv_power_diag']:
+    if whitening_method in ['homo_diag', 'hetero_diag', 'log_inv_power_diag']:
         W = compute_whitening_matrix(
             method=whitening_method,
             observed_powers=observed_powers_linear,
