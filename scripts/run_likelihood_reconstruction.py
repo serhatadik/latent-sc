@@ -436,6 +436,7 @@ def run_likelihood_experiment(
     delta_c: float = 50.0,
     pmf_threshold: float = 1e-6,
     fit_exponent: bool = False,
+    cov_type: str = 'exponential',
     verbose: bool = False,
     save_plots: bool = False,
     plot_output_dir: Optional[Path] = None,
@@ -545,12 +546,16 @@ def run_likelihood_experiment(
         )
 
         # --- 3) Covariance matrix ---
-        cov_matrix = build_covariance_matrix(
-            sensor_locations=sensor_locations,
-            sigma=sigma,
-            delta_c=delta_c,
-            scale=scale,
-        )
+        if cov_type == 'identity':
+            M = len(sensor_locations)
+            cov_matrix = np.eye(M)
+        else:
+            cov_matrix = build_covariance_matrix(
+                sensor_locations=sensor_locations,
+                sigma=sigma,
+                delta_c=delta_c,
+                scale=scale,
+            )
 
         # --- 4) PMF (vectorized) ---
         pmf = compute_pmf_vectorized(
@@ -721,7 +726,7 @@ def _worker(args_tuple):
     """Unpack arguments and run a single experiment."""
     (data_info_ser, config, map_data, model_type, sigma, delta_c,
      pmf_threshold, verbose, save_plots, plot_output_dir_str,
-     all_tx_locations, fit_exponent) = args_tuple
+     all_tx_locations, fit_exponent, cov_type) = args_tuple
 
     # Reconstruct non-serializable objects
     data_info = data_info_ser.copy()
@@ -737,6 +742,7 @@ def _worker(args_tuple):
         delta_c=delta_c,
         pmf_threshold=pmf_threshold,
         fit_exponent=fit_exponent,
+        cov_type=cov_type,
         verbose=verbose,
         save_plots=save_plots,
         plot_output_dir=plot_output_dir,
@@ -801,6 +807,11 @@ def main():
         '--fit-exponent', action='store_true',
         help='Empirically fit path loss exponent from sensor data (log_distance only)',
     )
+    parser.add_argument(
+        '--cov-type', type=str, default='exponential',
+        choices=['exponential', 'identity'],
+        help='Covariance matrix type: exponential (spatial decay) or identity (independent sensors)',
+    )
     args = parser.parse_args()
 
     # --- Output directory ---
@@ -813,6 +824,8 @@ def main():
         if args.nloc is not None:
             parts.append(f'nloc_{args.nloc}')
         parts.append(f'sigma_{args.sigma}_dc_{args.delta_c}')
+        if args.cov_type != 'exponential':
+            parts.append(f'cov_{args.cov_type}')
         output_dir = Path('results') / '_'.join(parts)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -874,6 +887,7 @@ def main():
     print(f"  Delta_c:       {args.delta_c} m")
     print(f"  PMF threshold: {args.pmf_threshold}")
     print(f"  Fit exponent:  {args.fit_exponent}")
+    print(f"  Cov type:      {args.cov_type}")
     print(f"  Workers:       {args.workers}")
     print(f"  Output:        {output_dir}")
 
@@ -887,6 +901,7 @@ def main():
         'tx_counts': args.tx_counts,
         'max_dirs': args.max_dirs,
         'fit_exponent': args.fit_exponent,
+        'cov_type': args.cov_type,
         'total_dirs': total_dirs,
         'timestamp': datetime.now().isoformat(),
     }
@@ -960,6 +975,7 @@ def main():
                 delta_c=args.delta_c,
                 pmf_threshold=args.pmf_threshold,
                 fit_exponent=args.fit_exponent,
+                cov_type=args.cov_type,
                 verbose=args.verbose,
                 save_plots=args.save_plots,
                 plot_output_dir=output_dir,
@@ -977,7 +993,7 @@ def main():
         task_args = [
             (d_ser, config, map_data, args.model_type, args.sigma, args.delta_c,
              args.pmf_threshold, args.verbose, args.save_plots, str(output_dir),
-             all_tx_locations, args.fit_exponent)
+             all_tx_locations, args.fit_exponent, args.cov_type)
             for d_ser in all_dirs_ser
         ]
         with ProcessPoolExecutor(max_workers=n_workers,
