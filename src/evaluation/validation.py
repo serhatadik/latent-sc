@@ -6,7 +6,6 @@ predicted signal strengths against a large set of widespread observations.
 """
 
 import os
-import hashlib
 import numpy as np
 import yaml
 from pathlib import Path
@@ -16,6 +15,13 @@ import joblib
 from src.utils import get_sensor_locations_array, load_monitoring_locations
 from src.sparse_reconstruction.propagation_matrix import compute_propagation_matrix
 from src.sparse_reconstruction import linear_to_dbm, dbm_to_linear
+
+# In-memory LRU-1 cache for validation propagation matrices.
+# Avoids redundant disk reads of large (1-3 GB) matrices when the same
+# validation config is used across multiple calls within a worker process
+# (e.g. across sigma-noise strategies in the ablation study).
+_val_prop_matrix_cache = {}   # {cache_key: prop_matrix}
+_VAL_CACHE_MAX = 2            # keep at most 2 entries
 
 class ReconstructionValidator:
     """
@@ -102,41 +108,52 @@ class ReconstructionValidator:
         ndarray
             Propagation matrix A_val.
         """
-        # Ensure cache dir exists
-        cache_path = Path(cache_dir)
-        cache_path.mkdir(parents=True, exist_ok=True)
-        
-        # Create a stable hash for the configuration
-        # Hash includes: val_points coords, map_shape, model_type, config content
-        hasher = hashlib.md5()
-        hasher.update(self.val_points.tobytes())
-        hasher.update(str(self.map_data['shape']).encode('utf-8'))
-        hasher.update(str(scale).encode('utf-8'))
-        hasher.update(model_type.encode('utf-8'))
-        hasher.update(str(np_exponent).encode('utf-8'))
+        M_val = len(self.val_points)
 
-        if model_config_path:
-            with open(model_config_path, 'rb') as f:
-                hasher.update(f.read())
-        
-        cache_key = hasher.hexdigest()
-        cache_file = cache_path / f"prop_matrix_val_{cache_key}.npy"
-        
-        if cache_file.exists():
-            if verbose:
-                print(f"Loading cached propagation matrix from {cache_file}...")
-            self.prop_matrix = np.load(cache_file)
+        # --- In-memory cache (keyed by model_type + point count) ---
+        mem_key = (model_type, M_val)
+        if mem_key in _val_prop_matrix_cache:
+            self.prop_matrix = _val_prop_matrix_cache[mem_key]
             self.prop_matrix_model_type = model_type
             return self.prop_matrix
-            
+
+        # --- Hard-coded TIREM / Sionna validation caches ---
+        # Two pre-computed matrices exist per model:
+        #   1221 validation points (non-ustar combos)
+        #    698 validation points (ustar combos)
+        _THIS_DIR = Path(__file__).parent.resolve()
+        _PROJECT_ROOT = _THIS_DIR.parent.parent
+
+        _KNOWN_CACHES = {
+            'tirem': {
+                1221: _PROJECT_ROOT / "data" / "cache" / "tirem" / "tirem_prop_matrix_26dc7e437183c58d84b76bb8b7848754.npy",
+                698:  _PROJECT_ROOT / "data" / "cache" / "tirem" / "tirem_prop_matrix_6e6dac51010030dd7a3c5429299586ac.npy",
+            },
+            'raytracing': {
+                1221: _PROJECT_ROOT / "data" / "cache" / "sionna" / "sionna_prop_matrix_a0956f0ef3290e4da7f8879536bf3d83.npy",
+                698:  _PROJECT_ROOT / "data" / "cache" / "sionna" / "sionna_prop_matrix_d9d86b77240533a474c90654745a342e.npy",
+            },
+        }
+
+        known = _KNOWN_CACHES.get(model_type, {}).get(M_val)
+        if known and known.exists():
+            if verbose:
+                print(f"Loading pre-computed validation matrix: {known.name}")
+            self.prop_matrix = np.load(known)
+            self.prop_matrix_model_type = model_type
+            if len(_val_prop_matrix_cache) >= _VAL_CACHE_MAX:
+                _val_prop_matrix_cache.pop(next(iter(_val_prop_matrix_cache)))
+            _val_prop_matrix_cache[mem_key] = self.prop_matrix
+            return self.prop_matrix
+
+        # --- Fallback: compute from scratch ---
         if verbose:
-            print(f"Computing propagation matrix for validation (M={len(self.val_points)}, N={np.prod(self.map_data['shape'])})...")
+            print(f"Computing propagation matrix for validation (M={M_val}, N={np.prod(self.map_data['shape'])})...")
             print(f"  Model: {model_type}")
             print(f"  Config: {model_config_path}")
-            
+
         start_time = time.time()
-        
-        # Compute matrix
+
         self.prop_matrix = compute_propagation_matrix(
             sensor_locations=self.val_points,
             map_shape=self.map_data['shape'],
@@ -147,14 +164,16 @@ class ReconstructionValidator:
             n_jobs=n_jobs,
             verbose=verbose
         )
-        
+
         elapsed = time.time() - start_time
         if verbose:
-            print(f"Computation finished in {elapsed:.2f}s. Saving to cache...")
-            
-        np.save(cache_file, self.prop_matrix)
+            print(f"Computation finished in {elapsed:.2f}s")
+
         self.prop_matrix_model_type = model_type
-        
+        if len(_val_prop_matrix_cache) >= _VAL_CACHE_MAX:
+            _val_prop_matrix_cache.pop(next(iter(_val_prop_matrix_cache)))
+        _val_prop_matrix_cache[mem_key] = self.prop_matrix
+
         return self.prop_matrix
 
     def predict_rss(self, est_tx_map_linear):

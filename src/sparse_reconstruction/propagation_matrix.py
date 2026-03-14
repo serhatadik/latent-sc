@@ -13,8 +13,30 @@ The linear path gain is derived from the log-distance path loss model:
 This allows linear superposition: p^th = A_model · t
 """
 
+import hashlib
+import numpy as np
 from src.propagation import LogDistanceModel, TiremModel
 from src.propagation.log_distance import compute_linear_path_gain
+
+# In-memory LRU-1 cache to avoid redundant disk I/O when the same
+# propagation matrix is requested multiple times within a worker process
+# (e.g. across sigma-noise strategies in the ablation study).
+_prop_matrix_cache = {}   # {cache_key: A_model}
+_PROP_CACHE_MAX = 2       # keep at most 2 entries (localization + validation)
+
+
+def _make_cache_key(model_type, sensor_locations, map_shape, scale,
+                    config_path, np_exponent):
+    """Build a lightweight hashable key for the in-memory cache."""
+    h = hashlib.md5()
+    h.update(model_type.encode())
+    h.update(np.asarray(sensor_locations).tobytes())
+    h.update(str(map_shape).encode())
+    h.update(str(scale).encode())
+    h.update(str(config_path).encode())
+    h.update(str(np_exponent).encode())
+    return h.hexdigest()
+
 
 def compute_propagation_matrix(sensor_locations, map_shape, scale=1.0,
                                 model_type='log_distance', config_path=None,
@@ -54,15 +76,25 @@ def compute_propagation_matrix(sensor_locations, map_shape, scale=1.0,
     A_model : ndarray of shape (M, N)
         Propagation matrix with linear path gains
     """
+    # Check in-memory cache first (avoids TiremModel creation + disk I/O)
+    effective_config = config_path
+    if effective_config is None:
+        if model_type == 'tirem':
+            effective_config = 'config/tirem_parameters.yaml'
+        elif model_type == 'raytracing':
+            effective_config = 'config/sionna_parameters.yaml'
+
+    cache_key = _make_cache_key(model_type, sensor_locations, map_shape,
+                                scale, effective_config, np_exponent)
+    if cache_key in _prop_matrix_cache:
+        return _prop_matrix_cache[cache_key]
+
     if model_type == 'log_distance':
         model = LogDistanceModel(np_exponent=np_exponent, pi0=pi0, di0=di0, vectorized=vectorized)
-        return model.compute_propagation_matrix(sensor_locations, map_shape, scale=scale, verbose=verbose)
+        result = model.compute_propagation_matrix(sensor_locations, map_shape, scale=scale, verbose=verbose)
     elif model_type == 'tirem':
-        if config_path is None:
-            # Default to standard location if not provided
-            config_path = 'config/tirem_parameters.yaml'
-        model = TiremModel(config_path)
-        return model.compute_propagation_matrix(sensor_locations, map_shape, scale=scale, n_jobs=n_jobs, verbose=verbose)
+        model = TiremModel(effective_config)
+        result = model.compute_propagation_matrix(sensor_locations, map_shape, scale=scale, n_jobs=n_jobs, verbose=verbose)
     elif model_type == 'raytracing':
         # Sionna ray-tracing model
         from src.propagation import SionnaModel
@@ -71,13 +103,17 @@ def compute_propagation_matrix(sensor_locations, map_shape, scale=1.0,
                 "Sionna is required for raytracing model. "
                 "Install with: pip install sionna"
             )
-        if config_path is None:
-            config_path = 'config/sionna_parameters.yaml'
-        model = SionnaModel(config_path)
-        return model.compute_propagation_matrix(sensor_locations, map_shape, scale=scale, n_jobs=n_jobs,
+        model = SionnaModel(effective_config)
+        result = model.compute_propagation_matrix(sensor_locations, map_shape, scale=scale, n_jobs=n_jobs,
                                                 verbose=verbose)
     else:
         raise ValueError(f"Unknown model type: {model_type}. Choose 'log_distance', 'tirem', or 'raytracing'.")
+
+    # Evict oldest entry if cache is full
+    if len(_prop_matrix_cache) >= _PROP_CACHE_MAX:
+        _prop_matrix_cache.pop(next(iter(_prop_matrix_cache)))
+    _prop_matrix_cache[cache_key] = result
+    return result
 
 
 def propagation_matrix_to_map(A_model, map_shape):
