@@ -633,19 +633,29 @@ def run_likelihood_experiment(
         finally:
             sys.stdout = old_stdout
 
-        # Validation propagation matrix — compute directly to pass np_exponent
-        # (validator.get_propagation_matrix doesn't forward np_exponent,
-        #  so log_distance would silently default to n=2)
-        A_val = compute_propagation_matrix(
-            sensor_locations=validator.val_points,
-            map_shape=map_data['shape'],
-            scale=scale,
-            model_type=model_type,
-            config_path=model_config_path,
-            np_exponent=np_exponent,
-            n_jobs=-1,
-            verbose=False,
-        )
+        # Validation propagation matrix — use validator's cache-aware loader
+        # for tirem/raytracing (loads pre-computed 698/1221-pt matrices),
+        # fall back to direct computation for log_distance (needs np_exponent).
+        if model_type in ('tirem', 'raytracing'):
+            validator.get_propagation_matrix(
+                model_type=model_type,
+                model_config_path=model_config_path,
+                scale=scale,
+                cache_dir=str(_PROJECT_ROOT / 'data' / 'cache'),
+                verbose=False,
+            )
+            A_val = validator.prop_matrix
+        else:
+            A_val = compute_propagation_matrix(
+                sensor_locations=validator.val_points,
+                map_shape=map_data['shape'],
+                scale=scale,
+                model_type=model_type,
+                config_path=model_config_path,
+                np_exponent=np_exponent,
+                n_jobs=-1,
+                verbose=False,
+            )
 
         # Marginalized prediction
         predicted_dBm = predict_at_validation_points(
@@ -1150,12 +1160,12 @@ def generate_likelihood_plots(raw_df: pd.DataFrame, output_dir: Path,
     # Publication style (matching ablation_plotting.py)
     plt.rcParams.update({
         'font.family': 'serif',
-        'font.size': 10,
-        'axes.labelsize': 11,
-        'axes.titlesize': 12,
-        'xtick.labelsize': 9,
-        'ytick.labelsize': 9,
-        'legend.fontsize': 9,
+        'font.size': 14,
+        'axes.labelsize': 16,
+        'axes.titlesize': 16,
+        'xtick.labelsize': 14,
+        'ytick.labelsize': 14,
+        'legend.fontsize': 12,
         'figure.dpi': 300,
         'savefig.dpi': 300,
         'savefig.bbox': 'tight',
@@ -1235,7 +1245,7 @@ def generate_likelihood_plots(raw_df: pd.DataFrame, output_dir: Path,
         ('recon_bias', 'Bias (dB)'),
     ]
 
-    fig, axes = plt.subplots(1, len(box_metrics), figsize=(7.5, 3.5))
+    fig, axes = plt.subplots(1, len(box_metrics), figsize=(12, 5))
 
     for ax_idx, (metric_col, metric_label) in enumerate(box_metrics):
         ax = axes[ax_idx]
@@ -1263,8 +1273,9 @@ def generate_likelihood_plots(raw_df: pd.DataFrame, output_dir: Path,
 
     fig.suptitle(f'Likelihood Reconstruction Distribution by TX Count\n'
                  f'Model: {model_type}  |  N={len(success_df)} directories',
-                 fontsize=12, fontweight='bold', y=1.08)
-    fig.tight_layout(rect=[0, 0, 1, 0.95])
+                 fontsize=20, fontweight='normal')
+    fig.tight_layout()
+    fig.subplots_adjust(top=0.85)
     _save(fig, 'likelihood_boxplots_by_tx_count')
 
     # --- Figure 3: Per-directory RMSE scatter (sorted) ---
