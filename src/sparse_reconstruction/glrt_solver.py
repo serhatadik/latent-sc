@@ -235,7 +235,8 @@ def _compute_candidate_scores(residual, A_model, W, A_w_norms_sq, denom_storage,
                               ceiling_penalty_weight, support, exclusion_mask,
                               map_shape, scale, use_power_filtering, power_density_sigma_m, power_density_threshold, 
                               sensor_locations, use_edf_penalty=False, edf_threshold=1.5,
-                              use_robust_scoring=False, robust_threshold=6.0, verbose=False):
+                              use_robust_scoring=False, robust_threshold=6.0, verbose=False,
+                              return_filter_diagnostics=False):
     """
     Compute GLRT scores for all candidates based on the current residual.
     Encapsulates scoring, physics checks, and masking.
@@ -304,41 +305,47 @@ def _compute_candidate_scores(residual, A_model, W, A_w_norms_sq, denom_storage,
     # Initialize physics modifiers
     physics_mask = np.ones_like(scores, dtype=bool)
     penalty_factors = np.ones_like(scores)
-    
+
+    # Save raw scores before filtering (for diagnostics)
+    if return_filter_diagnostics:
+        raw_scores = scores.copy()
+
     # CHECK A: Non-Negativity (Hard Constraint)
     negative_power_mask = x_hat < 0
     physics_mask[negative_power_mask] = False
-    
+
     # CHECK B: Silent Sensor Veto (Contradiction Check)
+    veto_mask = np.zeros_like(scores, dtype=bool)
     if veto_threshold is not None:
             candidates_to_check = np.where(physics_mask)[0]
-            
+
             if len(candidates_to_check) > 0:
                 margin_linear = 10**(veto_margin_db / 10.0)
-                
+
                 A_subset = A_model[:, candidates_to_check]     # (M, K)
                 x_subset = x_hat[candidates_to_check]          # (K,)
-                
+
                 pred_powers = A_subset * x_subset[np.newaxis, :] # (M, K)
                 obs_thresholds = observed_powers[:, np.newaxis] * margin_linear
-                diffs = pred_powers - obs_thresholds 
+                diffs = pred_powers - obs_thresholds
                 diffs[diffs < 0] = 0.0
                 contradiction_costs = np.sum(diffs, axis=0) # (K,)
-                
+
                 vetoed_indices_local = np.where(contradiction_costs > veto_threshold)[0]
                 vetoed_candidates = candidates_to_check[vetoed_indices_local]
+                veto_mask[vetoed_candidates] = True
                 physics_mask[vetoed_candidates] = False
-                
+
     # CHECK C: Power Plausibility Penalty (Soft Ceiling)
     valid_indices = np.where(physics_mask)[0]
     if len(valid_indices) > 0:
             x_valid = x_hat[valid_indices]
             x_valid_safe = np.maximum(x_valid, 1e-20)
             x_valid_dbm = 10 * np.log10(x_valid_safe)
-            
+
             excess = x_valid_dbm - max_tx_power_dbm
             excess[excess < 0] = 0.0
-            
+
             penalties = 1.0 / (1.0 + ceiling_penalty_weight * (excess**2))
             penalty_factors[valid_indices] = penalties
 
@@ -441,7 +448,17 @@ def _compute_candidate_scores(residual, A_model, W, A_w_norms_sq, denom_storage,
                 'threshold': power_density_threshold,
             }
 
-    return scores, power_density_info, denom_storage, x_hat
+    filter_diagnostics = None
+    if return_filter_diagnostics:
+        filter_diagnostics = {
+            'raw_scores': raw_scores,
+            'negative_power_mask': negative_power_mask,
+            'veto_mask': veto_mask,
+            'penalty_factors': penalty_factors,
+            'x_hat': x_hat,
+        }
+
+    return scores, power_density_info, denom_storage, x_hat, filter_diagnostics
 
 
 def _refined_selection(A_model, candidate_pool, observed_powers, W, 
@@ -532,8 +549,9 @@ def solve_iterative_glrt(A_model, W, observed_powers,
 
                          use_edf_penalty=False, edf_threshold=1.5,
                          use_robust_scoring=False, robust_threshold=6.0,
-                         verbose=True, 
+                         verbose=True,
                          beam_width=1, pool_refinement=True, max_pool_size=50,
+                         return_filter_diagnostics=False,
                          **solver_kwargs):
     """
     Solve for transmit power using Sequential "Add-One" Detection (GLRT) with Beam Search.
@@ -649,25 +667,35 @@ def solve_iterative_glrt(A_model, W, observed_powers,
     visited_states = set() # Avoid cycles
     
     candidates_history = [] # To keep compatibility with return signature (track best path)
+    filter_diagnostics_history = [] if return_filter_diagnostics else None
 
     for k in range(1, glrt_max_iter + 1):
         if verbose:
             print(f"\nIteration {k}: Analyzing {len(beam)} hypotheses...")
-            
+
         next_beam_candidates = []
-        
+
         for h_idx, hyp in enumerate(beam):
             # Compute GLRT scores for next candidate
-            scores, pd_info, _, _ = _compute_candidate_scores(
+            scores, pd_info, _, _, filt_diag = _compute_candidate_scores(
                 hyp['residual'], A_model, W, A_w_norms_sq, denom_storage,
                 dynamic_whitening, D_inv_mat, C_inv_storage, A_norm,
                 observed_powers, max_tx_power_dbm, veto_margin_db, veto_threshold,
                 ceiling_penalty_weight, hyp['support'], solver_kwargs.get('exclusion_mask', None),
-                map_shape, scale, use_power_filtering, power_density_sigma_m, power_density_threshold, 
+                map_shape, scale, use_power_filtering, power_density_sigma_m, power_density_threshold,
                 sensor_locations, use_edf_penalty=use_edf_penalty, edf_threshold=edf_threshold,
                 use_robust_scoring=use_robust_scoring, robust_threshold=robust_threshold,
-                verbose=(verbose and h_idx==0 and k==1)
+                verbose=(verbose and h_idx==0 and k==1),
+                return_filter_diagnostics=return_filter_diagnostics
             )
+
+            # Store filter diagnostics for best hypothesis (h_idx==0)
+            if return_filter_diagnostics and h_idx == 0:
+                filter_diagnostics_history.append({
+                    'iteration': k,
+                    'support': list(hyp['support']),
+                    **filt_diag,
+                })
 
             # Capture sparse scores for visualization (from parent)
             # We want to store this in the child so if the child becomes 'best', we have the map that produced it.
@@ -897,7 +925,10 @@ def solve_iterative_glrt(A_model, W, observed_powers,
              fit_kwargs['spatial_weights'] = fit_kwargs['spatial_weights'][final_support]
              
         fit_kwargs['lambda_reg'] = 0.0
-        for k in ['beam_width', 'pool_refinement']: fit_kwargs.pop(k, None)
+        for k in ['beam_width', 'pool_refinement', 'max_pool_size',
+                   'whitening_method', 'sigma_noise', 'eta',
+                   'geometric_features', 'feature_rho',
+                   'exclusion_mask']: fit_kwargs.pop(k, None)
         
         final_amplitudes, _ = solve_sparse_reconstruction_scipy(
              A_sub, W, observed_powers, verbose=False, **fit_kwargs
@@ -918,6 +949,7 @@ def solve_iterative_glrt(A_model, W, observed_powers,
         'support': final_support,
         'final_support': final_support, # Explicit key for visualization
         'candidates_history': candidates_history,
+        'filter_diagnostics_history': filter_diagnostics_history,
         'success': True
     }
     
