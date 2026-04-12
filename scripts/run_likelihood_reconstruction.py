@@ -31,7 +31,7 @@ import numpy as np
 import pandas as pd
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Sequence
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -156,6 +156,101 @@ def predict_at_validation_points(
         predicted_dBm = 10.0 * np.log10(np.maximum(predicted_linear, 1e-20))
 
     return predicted_dBm
+
+
+def compute_pmf_sharpness_metrics(
+    pmf: np.ndarray,
+    threshold: float = 0.0,
+) -> Dict[str, float]:
+    """
+    Compute PMF sharpness metrics that are cheap to aggregate across experiments.
+
+    Parameters
+    ----------
+    pmf : (N,) PMF over grid cells (flattened)
+    threshold : float, optional
+        Threshold used to define PMF support. Cells with pmf > threshold are
+        counted as active support.
+
+    Returns
+    -------
+    dict
+        Entropy, normalized entropy, peak mass, top-k mass, effective support,
+        and support size/fraction.
+    """
+    pmf = np.asarray(pmf, dtype=np.float64).ravel()
+    n_cells = len(pmf)
+
+    if n_cells == 0:
+        return {
+            'pmf_entropy': np.nan,
+            'pmf_entropy_norm': np.nan,
+            'pmf_peak_mass': np.nan,
+            'pmf_top5_mass': np.nan,
+            'pmf_effective_support': np.nan,
+            'pmf_support_size': 0,
+            'pmf_support_fraction': np.nan,
+        }
+
+    support_mask = pmf > threshold
+    support_size = int(np.sum(support_mask))
+
+    positive = pmf[pmf > 0]
+    if len(positive) == 0:
+        entropy = 0.0
+    else:
+        entropy = float(-np.sum(positive * np.log(positive)))
+
+    entropy_norm = float(entropy / np.log(n_cells)) if n_cells > 1 else 0.0
+    peak_mass = float(np.max(pmf))
+    topk = min(5, n_cells)
+    top5_mass = float(np.sum(np.partition(pmf, -topk)[-topk:]))
+    effective_support = float(np.exp(entropy))
+    support_fraction = float(support_size / n_cells)
+
+    return {
+        'pmf_entropy': entropy,
+        'pmf_entropy_norm': entropy_norm,
+        'pmf_peak_mass': peak_mass,
+        'pmf_top5_mass': top5_mass,
+        'pmf_effective_support': effective_support,
+        'pmf_support_size': support_size,
+        'pmf_support_fraction': support_fraction,
+    }
+
+
+def compute_peak_hypothesis_residual(
+    transmit_power_map: np.ndarray,
+    propagation_matrix: np.ndarray,
+    observed_powers: np.ndarray,
+    pmf: np.ndarray,
+) -> np.ndarray:
+    """
+    Residual vector for the MAP/peak PMF hypothesis after closed-form power fit.
+
+    This is useful for residual diagnostics because it isolates the residual
+    structure of the single hypothesis that the PMF ranks highest.
+    """
+    t_hat = transmit_power_map.ravel()
+    peak_idx = int(np.argmax(pmf))
+
+    with np.errstate(divide='ignore'):
+        gain_db = 10.0 * np.log10(np.maximum(propagation_matrix[:, peak_idx], 1e-20))
+
+    predicted = t_hat[peak_idx] + gain_db
+    return predicted - observed_powers
+
+
+def summarize_residual_vector(residual: np.ndarray) -> Dict[str, float]:
+    """Compact per-experiment summary of the peak-hypothesis residual vector."""
+    residual = np.asarray(residual, dtype=np.float64).ravel()
+    return {
+        'peak_resid_rmse': float(np.sqrt(np.mean(residual**2))),
+        'peak_resid_mae': float(np.mean(np.abs(residual))),
+        'peak_resid_bias': float(np.mean(residual)),
+        'peak_resid_std': float(np.std(residual)),
+        'peak_resid_max_abs': float(np.max(np.abs(residual))),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -441,6 +536,7 @@ def run_likelihood_experiment(
     save_plots: bool = False,
     plot_output_dir: Optional[Path] = None,
     all_tx_locations: Optional[Dict] = None,
+    np_exponent_override: Optional[float] = None,
 ) -> Optional[Dict]:
     """
     Run likelihood-based reconstruction for one data directory.
@@ -454,7 +550,7 @@ def run_likelihood_experiment(
     seed = data_info['seed']
     num_locations = data_info.get('num_locations')
     scale = config['spatial']['proxel_size']
-    np_exponent = config['localization']['path_loss_exponent']
+    np_exponent = np_exponent_override if np_exponent_override is not None else config['localization']['path_loss_exponent']
 
     result_template = {
         'dir_name': data_info['name'],
@@ -479,6 +575,18 @@ def run_likelihood_experiment(
         'obs_min_dbm': np.nan,
         'obs_mean_dbm': np.nan,
         'obs_max_dbm': np.nan,
+        'pmf_entropy': np.nan,
+        'pmf_entropy_norm': np.nan,
+        'pmf_peak_mass': np.nan,
+        'pmf_top5_mass': np.nan,
+        'pmf_effective_support': np.nan,
+        'pmf_support_size': 0,
+        'pmf_support_fraction': np.nan,
+        'peak_resid_rmse': np.nan,
+        'peak_resid_mae': np.nan,
+        'peak_resid_bias': np.nan,
+        'peak_resid_std': np.nan,
+        'peak_resid_max_abs': np.nan,
     }
 
     try:
@@ -548,7 +656,7 @@ def run_likelihood_experiment(
         # --- 3) Covariance matrix ---
         if cov_type == 'identity':
             M = len(sensor_locations)
-            cov_matrix = np.eye(M)
+            cov_matrix = (sigma ** 2) * np.eye(M)
         else:
             cov_matrix = build_covariance_matrix(
                 sensor_locations=sensor_locations,
@@ -610,6 +718,17 @@ def run_likelihood_experiment(
 
         result_template['np_exponent_used'] = np_exponent
         result_template['n_pmf_active'] = int(np.sum(pmf > 0))
+        result_template.update(
+            compute_pmf_sharpness_metrics(pmf, threshold=pmf_threshold)
+        )
+
+        peak_residual = compute_peak_hypothesis_residual(
+            transmit_power_map=transmit_power_map,
+            propagation_matrix=A_model,
+            observed_powers=observed_powers_dB,
+            pmf=pmf,
+        )
+        result_template.update(summarize_residual_vector(peak_residual))
 
         # --- 5) Validation ---
         val_config, val_data_dir = get_validation_paths(transmitters, _PROJECT_ROOT)
@@ -736,7 +855,7 @@ def _worker(args_tuple):
     """Unpack arguments and run a single experiment."""
     (data_info_ser, config, map_data, model_type, sigma, delta_c,
      pmf_threshold, verbose, save_plots, plot_output_dir_str,
-     all_tx_locations, fit_exponent, cov_type) = args_tuple
+     all_tx_locations, fit_exponent, cov_type, np_exponent_override) = args_tuple
 
     # Reconstruct non-serializable objects
     data_info = data_info_ser.copy()
@@ -757,7 +876,596 @@ def _worker(args_tuple):
         save_plots=save_plots,
         plot_output_dir=plot_output_dir,
         all_tx_locations=all_tx_locations,
+        np_exponent_override=np_exponent_override,
     )
+
+
+# ---------------------------------------------------------------------------
+# Parameter Sensitivity Studies
+# ---------------------------------------------------------------------------
+
+def _run_sweep_single(
+    data_info: Dict,
+    config: Dict,
+    map_data: Dict,
+    model_type: str,
+    sigma: float,
+    delta_c: float,
+    pmf_threshold: float,
+    fit_exponent: bool,
+    cov_type: str,
+    np_exponent_override: Optional[float],
+) -> Optional[Dict]:
+    """Run a single experiment for the parameter sweep (sequential helper)."""
+    return run_likelihood_experiment(
+        data_info=data_info,
+        config=config,
+        map_data=map_data,
+        model_type=model_type,
+        sigma=sigma,
+        delta_c=delta_c,
+        pmf_threshold=pmf_threshold,
+        fit_exponent=fit_exponent,
+        cov_type=cov_type,
+        verbose=False,
+        save_plots=False,
+        np_exponent_override=np_exponent_override,
+    )
+
+
+def run_parameter_study(
+    args,
+    config: Dict,
+    map_data: Dict,
+    all_dirs: list,
+    output_dir: Path,
+    all_tx_locations: Optional[Dict],
+):
+    """
+    Run a parameter sensitivity study, sweeping over covariance parameters
+    (sigma, delta_c) or path loss exponent (np).
+
+    Results are collected per parameter combination, summarized, and plotted.
+    """
+    study_type = args.study
+    total_dirs = len(all_dirs)
+
+    n_workers = args.workers
+    if n_workers == -1:
+        n_workers = max(1, os.cpu_count() - 1)
+
+    # Serialize data_info dicts (Path objects aren't picklable)
+    all_dirs_ser = []
+    for d in all_dirs:
+        all_dirs_ser.append({
+            'name': d['name'],
+            'transmitters': d['transmitters'],
+            'num_locations': d.get('num_locations'),
+            'seed': d['seed'],
+            'path_str': str(d['path']),
+        })
+
+    # --- Build flat list of task argument tuples ---
+    if study_type == 'covariance':
+        sigma_values = [float(x.strip()) for x in args.sigma_values.split(',')]
+        delta_c_values = [float(x.strip()) for x in args.delta_c_values.split(',')]
+        param_combos = [(s, dc) for s in sigma_values for dc in delta_c_values]
+        total_runs = len(param_combos) * total_dirs
+
+        print(f"\n{'='*70}")
+        print(f"COVARIANCE PARAMETER SENSITIVITY STUDY")
+        print(f"  sigma values:   {sigma_values}")
+        print(f"  delta_c values: {delta_c_values}")
+        print(f"  Parameter combos: {len(param_combos)}")
+        print(f"  Directories:      {total_dirs}")
+        print(f"  Total runs:       {total_runs}")
+        print(f"  Workers:          {n_workers}")
+        print(f"{'='*70}\n")
+
+        task_args = []
+        for sigma, delta_c in param_combos:
+            for d_ser in all_dirs_ser:
+                task_args.append(
+                    (d_ser, config, map_data, 'log_distance', sigma, delta_c,
+                     args.pmf_threshold, False, False, None,
+                     None, args.fit_exponent, 'exponential', None)
+                )
+
+    elif study_type == 'path_loss':
+        np_values = [float(x.strip()) for x in args.np_values.split(',')]
+        total_runs = len(np_values) * total_dirs
+
+        print(f"\n{'='*70}")
+        print(f"PATH LOSS EXPONENT SENSITIVITY STUDY")
+        print(f"  np values:   {np_values}")
+        print(f"  Directories: {total_dirs}")
+        print(f"  Total runs:  {total_runs}")
+        print(f"  Workers:     {n_workers}")
+        print(f"{'='*70}\n")
+
+        task_args = []
+        for np_val in np_values:
+            for d_ser in all_dirs_ser:
+                task_args.append(
+                    (d_ser, config, map_data, 'log_distance', args.sigma, args.delta_c,
+                     args.pmf_threshold, False, False, None,
+                     None, False, args.cov_type, np_val)
+                )
+
+    else:
+        print(f"Unknown study type: {study_type}")
+        return
+
+    # --- Resume: load previous checkpoint and filter out completed tasks ---
+    checkpoint_csv = output_dir / f'study_{study_type}_checkpoint.csv'
+    resumed_results = []
+
+    if args.resume and checkpoint_csv.exists():
+        prev_df = pd.read_csv(checkpoint_csv)
+        resumed_results = prev_df.to_dict('records')
+
+        # Build set of completed (dir_name, sigma, delta_c, np_exponent) keys
+        done_keys = set()
+        for _, row in prev_df.iterrows():
+            if study_type == 'covariance':
+                done_keys.add((row['dir_name'], float(row['sigma']), float(row['delta_c'])))
+            elif study_type == 'path_loss':
+                np_col = 'np_exponent_param' if 'np_exponent_param' in prev_df.columns else 'np_exponent_used'
+                done_keys.add((row['dir_name'], float(row[np_col])))
+
+        # Filter out already-completed tasks
+        original_count = len(task_args)
+        filtered_args = []
+        for ta in task_args:
+            d_ser = ta[0]
+            if study_type == 'covariance':
+                key = (d_ser['name'], ta[4], ta[5])  # (dir_name, sigma, delta_c)
+            else:
+                key = (d_ser['name'], ta[13])  # (dir_name, np_exponent)
+            if key not in done_keys:
+                filtered_args.append(ta)
+        task_args = filtered_args
+
+        print(f"  Resumed from checkpoint: {len(resumed_results)} completed, "
+              f"{len(task_args)} remaining (of {original_count} total)")
+        total_runs = original_count  # keep total for progress display
+    else:
+        total_runs = len(task_args)
+
+    # --- Execute tasks (sequential or parallel) ---
+    all_results = list(resumed_results)
+    start_time = time.time()
+    CHECKPOINT_INTERVAL = 20
+    tasks_remaining = len(task_args)
+
+    def _flush_study_checkpoint():
+        if all_results:
+            pd.DataFrame(all_results).to_csv(checkpoint_csv, index=False)
+
+    if tasks_remaining == 0:
+        print("  All tasks already completed — skipping to summary/plots.")
+    elif n_workers <= 1:
+        for i, ta in enumerate(task_args):
+            result = _worker(ta)
+            if result is not None:
+                if study_type == 'path_loss' and ta[13] is not None:
+                    result['np_exponent_param'] = ta[13]
+                all_results.append(result)
+
+            completed = len(all_results)
+            if (i + 1) % 20 == 0 or (i + 1) <= 3:
+                elapsed = time.time() - start_time
+                rate = (i + 1) / elapsed if elapsed > 0 else 0
+                remaining = (tasks_remaining - i - 1) / rate / 60 if rate > 0 else 0
+                print(f"  [{completed}/{total_runs}] {elapsed/60:.1f}min elapsed, "
+                      f"~{remaining:.1f}min remaining")
+
+            if (i + 1) % CHECKPOINT_INTERVAL == 0:
+                _flush_study_checkpoint()
+
+        _flush_study_checkpoint()
+    else:
+        print(f"  Using {n_workers} parallel workers...")
+        with ProcessPoolExecutor(max_workers=n_workers,
+                                 initializer=_worker_init) as executor:
+            futures = {executor.submit(_worker, ta): ta for ta in task_args}
+            done_count = 0
+            for future in as_completed(futures):
+                ta = futures[future]
+                done_count += 1
+                try:
+                    result = future.result()
+                except Exception as e:
+                    result = None
+                    print(f"  Worker exception: {e}")
+                if result is not None:
+                    if study_type == 'path_loss' and ta[13] is not None:
+                        result['np_exponent_param'] = ta[13]
+                    all_results.append(result)
+
+                if done_count % 20 == 0 or done_count <= 5:
+                    elapsed = time.time() - start_time
+                    rate = done_count / elapsed if elapsed > 0 else 0
+                    remaining = (tasks_remaining - done_count) / rate / 60 if rate > 0 else 0
+                    print(f"  [{len(all_results)}/{total_runs}] {elapsed/60:.1f}min elapsed, "
+                          f"~{remaining:.1f}min remaining")
+
+                if done_count % CHECKPOINT_INTERVAL == 0:
+                    _flush_study_checkpoint()
+
+        _flush_study_checkpoint()
+
+    raw_df = pd.DataFrame(all_results)
+
+    # --- Save final results ---
+    elapsed_total = time.time() - start_time
+    raw_csv = output_dir / f'study_{study_type}_raw_results.csv'
+    raw_df.to_csv(raw_csv, index=False)
+    print(f"\nRaw results saved: {raw_csv} ({len(raw_df)} rows)")
+
+    # --- Generate summary & plots ---
+    success_df = raw_df[raw_df['recon_status'] == 'success'].copy()
+    if success_df.empty:
+        print("No successful results to summarize.")
+        return
+
+    if study_type == 'covariance':
+        _summarize_covariance_study(success_df, output_dir)
+        _plot_covariance_study(success_df, output_dir)
+    elif study_type == 'path_loss':
+        _summarize_path_loss_study(success_df, output_dir)
+        _plot_path_loss_study(success_df, output_dir)
+
+    print(f"\n{'='*70}")
+    print(f"Parameter study '{study_type}' complete!")
+    print(f"  Results: {output_dir}")
+    print(f"  Runtime: {elapsed_total/60:.1f} minutes")
+    print(f"{'='*70}")
+
+
+# ---------------------------------------------------------------------------
+# Covariance study summary & plots
+# ---------------------------------------------------------------------------
+
+def _summarize_covariance_study(df: pd.DataFrame, output_dir: Path):
+    """Print and save summary table for the covariance parameter sweep."""
+    summary_rows = []
+    for (sigma, delta_c), group in df.groupby(['sigma', 'delta_c']):
+        row = {
+            'sigma': sigma,
+            'delta_c': delta_c,
+            'n_dirs': len(group),
+        }
+        for metric in ['recon_rmse', 'recon_mae', 'recon_bias', 'recon_max_error']:
+            vals = group[metric].dropna()
+            row[f'{metric}_mean'] = vals.mean() if len(vals) > 0 else np.nan
+            row[f'{metric}_std'] = vals.std() if len(vals) > 0 else np.nan
+            row[f'{metric}_median'] = vals.median() if len(vals) > 0 else np.nan
+        summary_rows.append(row)
+
+    summary_df = pd.DataFrame(summary_rows)
+    summary_csv = output_dir / 'study_covariance_summary.csv'
+    summary_df.to_csv(summary_csv, index=False)
+
+    print(f"\n{'='*70}")
+    print("COVARIANCE STUDY SUMMARY")
+    print(f"{'='*70}")
+    print(f"  {'sigma':<8s} {'delta_c':<10s} {'N':<6s} {'RMSE (dB)':<16s} {'MAE (dB)':<16s} {'Bias (dB)':<16s}")
+    print(f"  {'-'*8} {'-'*10} {'-'*6} {'-'*16} {'-'*16} {'-'*16}")
+    for _, row in summary_df.iterrows():
+        rmse = f"{row['recon_rmse_mean']:.2f}+/-{row['recon_rmse_std']:.2f}"
+        mae = f"{row['recon_mae_mean']:.2f}+/-{row['recon_mae_std']:.2f}"
+        bias = f"{row['recon_bias_mean']:.2f}+/-{row['recon_bias_std']:.2f}"
+        print(f"  {row['sigma']:<8.1f} {row['delta_c']:<10.0f} {int(row['n_dirs']):<6d} "
+              f"{rmse:<16s} {mae:<16s} {bias:<16s}")
+
+    print(f"\n  Summary saved: {summary_csv}")
+
+
+def _plot_covariance_study(df: pd.DataFrame, output_dir: Path):
+    """Generate heatmaps and grouped bar charts for the covariance study."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    plots_dir = output_dir / 'plots'
+    plots_dir.mkdir(parents=True, exist_ok=True)
+
+    plt.rcParams.update({
+        'font.family': 'serif',
+        'font.size': 14,
+        'axes.labelsize': 16,
+        'axes.titlesize': 16,
+        'figure.dpi': 300,
+        'savefig.dpi': 300,
+        'savefig.bbox': 'tight',
+        'savefig.pad_inches': 0.05,
+    })
+
+    sigma_values = sorted(df['sigma'].unique())
+    delta_c_values = sorted(df['delta_c'].unique())
+
+    def _save(fig, name):
+        fig.savefig(plots_dir / f'{name}.pdf', format='pdf')
+        fig.savefig(plots_dir / f'{name}.png', format='png')
+        plt.close(fig)
+
+    # --- Heatmaps of mean RMSE and MAE ---
+    for metric_col, metric_label in [('recon_rmse', 'RMSE'), ('recon_mae', 'MAE')]:
+        grid = np.full((len(sigma_values), len(delta_c_values)), np.nan)
+        for i, sigma in enumerate(sigma_values):
+            for j, delta_c in enumerate(delta_c_values):
+                vals = df[(df['sigma'] == sigma) & (df['delta_c'] == delta_c)][metric_col].dropna()
+                if len(vals) > 0:
+                    grid[i, j] = vals.mean()
+
+        fig, ax = plt.subplots(figsize=(7, 5.5))
+        im = ax.imshow(grid, cmap='RdYlGn_r', aspect='auto', origin='lower')
+        cbar = plt.colorbar(im, ax=ax)
+        cbar.set_label(f'Mean {metric_label} (dB)', fontsize=14)
+
+        ax.set_xticks(range(len(delta_c_values)))
+        ax.set_xticklabels([f'{d:.0f}' for d in delta_c_values])
+        ax.set_yticks(range(len(sigma_values)))
+        ax.set_yticklabels([f'{s:.1f}' for s in sigma_values])
+        ax.set_xlabel(r'Decorrelation Distance $\delta_c$ [m]')
+        ax.set_ylabel(r'Shadow Fading Std. Dev. $\sigma$ [dB]')
+        ax.set_title(f'Mean {metric_label} — Covariance Parameter Sensitivity\n'
+                     f'Log-Distance Model  |  N={len(df)} per combo (successful)')
+
+        # Annotate cells with values
+        for i in range(len(sigma_values)):
+            for j in range(len(delta_c_values)):
+                if np.isfinite(grid[i, j]):
+                    text_color = 'white' if grid[i, j] > np.nanmean(grid) else 'black'
+                    ax.text(j, i, f'{grid[i, j]:.1f}', ha='center', va='center',
+                            fontsize=13, fontweight='bold', color=text_color)
+
+        fig.tight_layout()
+        _save(fig, f'study_covariance_heatmap_{metric_col}')
+
+    # --- Grouped bar chart: RMSE by sigma, grouped by delta_c ---
+    COLORS = ['#0072B2', '#E69F00', '#009E73', '#D55E00', '#CC79A7', '#56B4E9']
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    n_sigma = len(sigma_values)
+    n_delta = len(delta_c_values)
+    bar_width = 0.8 / n_delta
+    x = np.arange(n_sigma)
+
+    for j, delta_c in enumerate(delta_c_values):
+        means = []
+        sems = []
+        for sigma in sigma_values:
+            vals = df[(df['sigma'] == sigma) & (df['delta_c'] == delta_c)]['recon_rmse'].dropna()
+            means.append(vals.mean() if len(vals) > 0 else np.nan)
+            sems.append(vals.sem() if len(vals) > 1 else 0)
+
+        offset = (j - n_delta / 2 + 0.5) * bar_width
+        bars = ax.bar(x + offset, means, bar_width, yerr=sems,
+                      color=COLORS[j % len(COLORS)], capsize=3,
+                      edgecolor='white', linewidth=0.5,
+                      label=f'$\\delta_c$={delta_c:.0f} m')
+
+        for k, (m, s) in enumerate(zip(means, sems)):
+            if np.isfinite(m):
+                ax.text(x[k] + offset, m + s + 0.2, f'{m:.1f}',
+                        ha='center', va='bottom', fontsize=8, fontweight='bold')
+
+    ax.set_xticks(x)
+    ax.set_xticklabels([f'{s:.1f}' for s in sigma_values])
+    ax.set_xlabel(r'Shadow Fading Std. Dev. $\sigma$ [dB]')
+    ax.set_ylabel('Mean RMSE (dB)')
+    ax.set_title('Reconstruction RMSE — Covariance Parameter Sensitivity')
+    ax.legend(fontsize=11)
+    ax.grid(axis='y', alpha=0.3)
+    fig.tight_layout()
+    _save(fig, 'study_covariance_grouped_bar_rmse')
+
+    # --- Box plots: one per (sigma, delta_c) combo ---
+    fig, ax = plt.subplots(figsize=(max(8, len(sigma_values) * len(delta_c_values) * 0.8), 5))
+    combo_data = []
+    combo_labels = []
+    for sigma in sigma_values:
+        for delta_c in delta_c_values:
+            vals = df[(df['sigma'] == sigma) & (df['delta_c'] == delta_c)]['recon_rmse'].dropna()
+            if len(vals) > 0:
+                combo_data.append(vals.values)
+                combo_labels.append(f'$\\sigma$={sigma:.1f}\n$\\delta_c$={delta_c:.0f}')
+
+    if combo_data:
+        bp = ax.boxplot(combo_data, labels=combo_labels, patch_artist=True,
+                        widths=0.6, showfliers=True,
+                        flierprops=dict(marker='o', markersize=3, alpha=0.5))
+        for i, patch in enumerate(bp['boxes']):
+            patch.set_facecolor(COLORS[i % len(COLORS)])
+            patch.set_alpha(0.7)
+        for median in bp['medians']:
+            median.set_color('black')
+            median.set_linewidth(1.5)
+
+    ax.set_ylabel('RMSE (dB)')
+    ax.set_title('RMSE Distribution — Covariance Parameter Combinations')
+    ax.grid(axis='y', alpha=0.3)
+    fig.tight_layout()
+    _save(fig, 'study_covariance_boxplot_rmse')
+
+    print(f"  Covariance study plots saved to: {plots_dir}")
+
+
+# ---------------------------------------------------------------------------
+# Path loss exponent study summary & plots
+# ---------------------------------------------------------------------------
+
+def _summarize_path_loss_study(df: pd.DataFrame, output_dir: Path):
+    """Print and save summary table for the path loss exponent sweep."""
+    np_col = 'np_exponent_param' if 'np_exponent_param' in df.columns else 'np_exponent_used'
+
+    summary_rows = []
+    for np_val, group in df.groupby(np_col):
+        row = {
+            'np_exponent': np_val,
+            'n_dirs': len(group),
+        }
+        for metric in ['recon_rmse', 'recon_mae', 'recon_bias', 'recon_max_error']:
+            vals = group[metric].dropna()
+            row[f'{metric}_mean'] = vals.mean() if len(vals) > 0 else np.nan
+            row[f'{metric}_std'] = vals.std() if len(vals) > 0 else np.nan
+            row[f'{metric}_median'] = vals.median() if len(vals) > 0 else np.nan
+        summary_rows.append(row)
+
+    summary_df = pd.DataFrame(summary_rows)
+    summary_csv = output_dir / 'study_path_loss_summary.csv'
+    summary_df.to_csv(summary_csv, index=False)
+
+    print(f"\n{'='*70}")
+    print("PATH LOSS EXPONENT STUDY SUMMARY")
+    print(f"{'='*70}")
+    print(f"  {'n_p':<8s} {'N':<6s} {'RMSE (dB)':<16s} {'MAE (dB)':<16s} {'Bias (dB)':<16s}")
+    print(f"  {'-'*8} {'-'*6} {'-'*16} {'-'*16} {'-'*16}")
+    for _, row in summary_df.iterrows():
+        rmse = f"{row['recon_rmse_mean']:.2f}+/-{row['recon_rmse_std']:.2f}"
+        mae = f"{row['recon_mae_mean']:.2f}+/-{row['recon_mae_std']:.2f}"
+        bias = f"{row['recon_bias_mean']:.2f}+/-{row['recon_bias_std']:.2f}"
+        print(f"  {row['np_exponent']:<8.1f} {int(row['n_dirs']):<6d} "
+              f"{rmse:<16s} {mae:<16s} {bias:<16s}")
+
+    print(f"\n  Summary saved: {summary_csv}")
+
+
+def _plot_path_loss_study(df: pd.DataFrame, output_dir: Path):
+    """Generate bar charts and box plots for the path loss exponent study."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    plots_dir = output_dir / 'plots'
+    plots_dir.mkdir(parents=True, exist_ok=True)
+
+    plt.rcParams.update({
+        'font.family': 'serif',
+        'font.size': 14,
+        'axes.labelsize': 16,
+        'axes.titlesize': 16,
+        'figure.dpi': 300,
+        'savefig.dpi': 300,
+        'savefig.bbox': 'tight',
+        'savefig.pad_inches': 0.05,
+        'axes.grid': True,
+        'grid.alpha': 0.3,
+        'axes.spines.top': False,
+        'axes.spines.right': False,
+    })
+
+    np_col = 'np_exponent_param' if 'np_exponent_param' in df.columns else 'np_exponent_used'
+    np_values = sorted(df[np_col].unique())
+
+    COLORS = ['#0072B2', '#E69F00', '#009E73', '#D55E00', '#CC79A7', '#56B4E9']
+
+    def _save(fig, name):
+        fig.savefig(plots_dir / f'{name}.pdf', format='pdf')
+        fig.savefig(plots_dir / f'{name}.png', format='png')
+        plt.close(fig)
+
+    # --- Bar chart: RMSE, MAE, Bias by np ---
+    metrics = [
+        ('recon_rmse', 'RMSE (dB)'),
+        ('recon_mae', 'MAE (dB)'),
+        ('recon_bias', 'Bias (dB)'),
+    ]
+
+    fig, axes = plt.subplots(1, len(metrics), figsize=(4 * len(metrics), 4.5))
+    x = np.arange(len(np_values))
+    bar_width = 0.6
+
+    for ax_idx, (metric_col, metric_label) in enumerate(metrics):
+        ax = axes[ax_idx]
+        means = []
+        sems = []
+        for np_val in np_values:
+            vals = df[df[np_col] == np_val][metric_col].dropna()
+            means.append(vals.mean() if len(vals) > 0 else np.nan)
+            sems.append(vals.sem() if len(vals) > 1 else 0)
+
+        bars = ax.bar(x, means, bar_width, yerr=sems,
+                      color=[COLORS[i % len(COLORS)] for i in range(len(np_values))],
+                      capsize=4, edgecolor='white', linewidth=0.5)
+
+        for i, (m, s) in enumerate(zip(means, sems)):
+            if np.isfinite(m):
+                ax.text(i, m + s + 0.3, f'{m:.1f}', ha='center', va='bottom',
+                        fontsize=9, fontweight='bold')
+
+        ax.set_xticks(x)
+        ax.set_xticklabels([f'{v:.1f}' for v in np_values])
+        ax.set_xlabel(r'Path Loss Exponent $n_p$')
+        ax.set_ylabel(metric_label)
+
+    fig.suptitle('Reconstruction Performance — Path Loss Exponent Sensitivity\n'
+                 'Log-Distance Model',
+                 fontsize=14, fontweight='bold', y=1.05)
+    fig.tight_layout()
+    _save(fig, 'study_path_loss_bar_metrics')
+
+    # --- Box plots: RMSE distribution per np ---
+    fig, ax = plt.subplots(figsize=(7, 5))
+    box_data = []
+    box_labels = []
+    for np_val in np_values:
+        vals = df[df[np_col] == np_val]['recon_rmse'].dropna()
+        if len(vals) > 0:
+            box_data.append(vals.values)
+            box_labels.append(f'$n_p$={np_val:.1f}')
+
+    if box_data:
+        bp = ax.boxplot(box_data, labels=box_labels, patch_artist=True,
+                        widths=0.5, showfliers=True,
+                        flierprops=dict(marker='o', markersize=3, alpha=0.5))
+        for i, patch in enumerate(bp['boxes']):
+            patch.set_facecolor(COLORS[i % len(COLORS)])
+            patch.set_alpha(0.7)
+        for median in bp['medians']:
+            median.set_color('black')
+            median.set_linewidth(1.5)
+
+    ax.set_ylabel('RMSE (dB)')
+    ax.set_title('RMSE Distribution — Path Loss Exponent Sensitivity')
+    fig.tight_layout()
+    _save(fig, 'study_path_loss_boxplot_rmse')
+
+    # --- Per TX-count breakdown (grouped bar) ---
+    tx_counts = sorted(df['tx_count'].unique())
+    if len(tx_counts) > 1:
+        fig, ax = plt.subplots(figsize=(8, 5))
+        n_np = len(np_values)
+        n_tc = len(tx_counts)
+        bar_width = 0.8 / n_np
+        x = np.arange(n_tc)
+
+        for j, np_val in enumerate(np_values):
+            means = []
+            sems = []
+            for tc in tx_counts:
+                vals = df[(df[np_col] == np_val) & (df['tx_count'] == tc)]['recon_rmse'].dropna()
+                means.append(vals.mean() if len(vals) > 0 else np.nan)
+                sems.append(vals.sem() if len(vals) > 1 else 0)
+
+            offset = (j - n_np / 2 + 0.5) * bar_width
+            ax.bar(x + offset, means, bar_width, yerr=sems,
+                   color=COLORS[j % len(COLORS)], capsize=3,
+                   edgecolor='white', linewidth=0.5,
+                   label=f'$n_p$={np_val:.1f}')
+
+        ax.set_xticks(x)
+        ax.set_xticklabels([str(tc) for tc in tx_counts])
+        ax.set_xlabel('TX Count')
+        ax.set_ylabel('Mean RMSE (dB)')
+        ax.set_title('RMSE by TX Count — Path Loss Exponent Sensitivity')
+        ax.legend(fontsize=11)
+        fig.tight_layout()
+        _save(fig, 'study_path_loss_by_tx_count')
+
+    print(f"  Path loss study plots saved to: {plots_dir}")
 
 
 # ---------------------------------------------------------------------------
@@ -822,20 +1530,54 @@ def main():
         choices=['exponential', 'identity'],
         help='Covariance matrix type: exponential (spatial decay) or identity (independent sensors)',
     )
+    parser.add_argument(
+        '--study', type=str, default=None,
+        choices=['covariance', 'path_loss'],
+        help='Parameter sensitivity study: "covariance" sweeps sigma/delta_c, '
+             '"path_loss" sweeps path loss exponent',
+    )
+    parser.add_argument(
+        '--sigma-values', type=str, default='2.0,4.5,8.0',
+        help='Comma-separated sigma values for covariance study (default: 2.0,4.5,8.0)',
+    )
+    parser.add_argument(
+        '--delta-c-values', type=str, default='20,50,100',
+        help='Comma-separated delta_c values for covariance study (default: 20,50,100)',
+    )
+    parser.add_argument(
+        '--np-values', type=str, default='3.0,3.5,4.0,4.5',
+        help='Comma-separated path loss exponent values for path_loss study (default: 3.0,3.5,4.0,4.5)',
+    )
+    parser.add_argument(
+        '--resume', type=str, default=None,
+        help='Resume an incomplete study from a previous output directory '
+             '(reads existing checkpoint CSV and skips completed experiments)',
+    )
     args = parser.parse_args()
 
     # --- Output directory ---
-    if args.output_dir:
+    if args.resume:
+        output_dir = Path(args.resume)
+        if not output_dir.exists():
+            print(f"ERROR: Resume directory does not exist: {output_dir}")
+            sys.exit(1)
+    elif args.output_dir:
         output_dir = Path(args.output_dir)
     else:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        parts = [f'likelihood_reconstruction_{timestamp}']
-        parts.append(f'model_{args.model_type}')
-        if args.nloc is not None:
-            parts.append(f'nloc_{args.nloc}')
-        parts.append(f'sigma_{args.sigma}_dc_{args.delta_c}')
-        if args.cov_type != 'exponential':
-            parts.append(f'cov_{args.cov_type}')
+        if args.study:
+            parts = [f'likelihood_study_{args.study}_{timestamp}']
+            parts.append(f'model_{args.model_type}')
+            if args.nloc is not None:
+                parts.append(f'nloc_{args.nloc}')
+        else:
+            parts = [f'likelihood_reconstruction_{timestamp}']
+            parts.append(f'model_{args.model_type}')
+            if args.nloc is not None:
+                parts.append(f'nloc_{args.nloc}')
+            parts.append(f'sigma_{args.sigma}_dc_{args.delta_c}')
+            if args.cov_type != 'exponential':
+                parts.append(f'cov_{args.cov_type}')
         output_dir = Path('results') / '_'.join(parts)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -917,6 +1659,18 @@ def main():
     }
     with open(output_dir / 'run_config.json', 'w') as f:
         json.dump(run_config, f, indent=2)
+
+    # --- Parameter sensitivity study dispatch ---
+    if args.study is not None:
+        run_parameter_study(
+            args=args,
+            config=config,
+            map_data=map_data,
+            all_dirs=all_dirs,
+            output_dir=output_dir,
+            all_tx_locations=all_tx_locations,
+        )
+        return
 
     # --- Run experiments ---
     print(f"\n{'='*70}")
@@ -1003,7 +1757,7 @@ def main():
         task_args = [
             (d_ser, config, map_data, args.model_type, args.sigma, args.delta_c,
              args.pmf_threshold, args.verbose, args.save_plots, str(output_dir),
-             all_tx_locations, args.fit_exponent, args.cov_type)
+             all_tx_locations, args.fit_exponent, args.cov_type, None)
             for d_ser in all_dirs_ser
         ]
         with ProcessPoolExecutor(max_workers=n_workers,
