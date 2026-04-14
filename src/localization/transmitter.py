@@ -194,36 +194,45 @@ def estimate_transmit_power_map(map_shape, sensor_locations, observed_powers,
     if propagation_matrix is not None:
         if verbose:
             print("Using precomputed propagation matrix for transmit power estimation...")
-            
-        # Vectorized implementation using propagation matrix
-        # For each pixel j, we want to find t_j that minimizes ||e_j(t_j)||_2
-        # e_j(t_j) = (t_j + 10*log10(A[:, j])) - p_observed
-        # Let G_j = 10*log10(A[:, j]) (path loss gain in dB)
-        # e_j(t_j) = t_j + G_j - p_observed
-        # Minimize sum((t_j + G_j - p_observed)^2)
-        # This is a simple 1D quadratic problem: min_x sum((x - c_i)^2)
-        # Solution is x = mean(c_i)
-        # Here x = t_j, c_i = p_observed[i] - G_j[i]
-        # So t_j_opt = mean(p_observed - G_j)
-        
-        # 1. Compute G matrix (dB gains)
-        # A is (M, N), we want G (M, N)
-        # Avoid log(0)
-        with np.errstate(divide='ignore'):
-            G_matrix = 10 * np.log10(np.maximum(propagation_matrix, 1e-20))
-            
-        # 2. Compute optimal t for each pixel
-        # t_opt = mean(p_observed - G_j) over sensors
-        # p_observed is (M,)
-        # p_observed - G_matrix is (M, N) (broadcasting p_observed column-wise)
-        # We want mean over axis 0 (sensors)
-        
-        # Broadcasting: (M, 1) - (M, N) -> (M, N)
-        diffs = observed_powers[:, np.newaxis] - G_matrix
-        t_opts = np.mean(diffs, axis=0) # Shape (N,)
-        
+
+        # Sensor-masked closed-form fit.
+        #
+        # For each cell i, pick t_j minimizing sum_j (t_j + G[j,i] - p_obs[j])^2
+        # where G[j,i] = 10*log10(A[j,i]). The closed form is the unweighted
+        # mean of (p_obs[j] - G[j,i]) over sensors.
+        #
+        # A[j,i] = 0 means "the ray-tracing engine produced no estimate for
+        # this (sensor, cell) pair", i.e. missing data, not "observed -inf dB".
+        # Clamping those entries to 1e-20 and feeding them into the mean
+        # inflates t_hat by ~3 dB per zero-valued sensor per cell, so for
+        # Sionna path-gain matrices with high zero fractions the closed form
+        # collapses. Instead, mask zeros out of the mean: only the sensors
+        # with A[j,i] > 0 contribute, and cells with no valid sensors get a
+        # placeholder of 0 (the downstream PMF eligibility check excludes
+        # them).
+        valid_mask = propagation_matrix > 0                 # (M, N) bool
+        n_valid = valid_mask.sum(axis=0)                    # (N,)
+
+        with np.errstate(divide='ignore', invalid='ignore'):
+            G_matrix = 10 * np.log10(
+                np.where(valid_mask, propagation_matrix, 1.0)
+            )                                               # (M, N), 0 at invalid
+
+        # Cell-wise sum of (p_obs - G) over the valid sensors. Entries at
+        # invalid (sensor, cell) pairs are zeroed so they drop out of the
+        # sum, which is faster and quieter than np.nanmean (no empty-slice
+        # warning on cells with n_valid == 0).
+        contributions = np.where(
+            valid_mask,
+            observed_powers[:, np.newaxis] - G_matrix,
+            0.0,
+        )                                                   # (M, N)
+        sum_per_cell = contributions.sum(axis=0)            # (N,)
+        n_safe = np.maximum(n_valid, 1)
+        t_opts = sum_per_cell / n_safe                      # (N,), 0 if n_valid==0
+
         transmit_power_map = t_opts.reshape(height, width)
-        
+
         return transmit_power_map
 
     # Create list of all pixel coordinates

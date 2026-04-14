@@ -67,9 +67,26 @@ def compute_pmf_vectorized(
     observed_powers: np.ndarray,
     cov_matrix: np.ndarray,
     threshold: float = 1e-6,
+    min_valid_sensors: int = None,
 ) -> np.ndarray:
     """
     Compute transmitter location PMF using vectorized operations.
+
+    Sensor-masked variant. For each grid cell, only sensors with strictly
+    positive path gain (A[j,i] > 0) are treated as informative. Zero-valued
+    entries, which occur in Sionna ray-tracing output when no traced path was
+    found for that (sensor, cell) pair, are treated as missing data and
+    skipped rather than clamped to -200 dB. Cells with fewer than
+    ``min_valid_sensors`` (default: max(1, M // 2)) informative sensors are
+    excluded from the PMF support. The per-cell quadratic form is scaled by
+    M / n_valid so that cells with fewer informative sensors cannot win the
+    softmax by summing fewer residuals.
+
+    For identity or hetero-diagonal covariance this is exactly equivalent to
+    the sub-matrix Mahalanobis distance over the valid sensors of each cell.
+    For spatially-correlated covariance it is a close approximation that
+    treats cross-sensor correlations involving a missing sensor as zero,
+    which is appropriate when the missing entry carries no information.
 
     Parameters
     ----------
@@ -78,20 +95,36 @@ def compute_pmf_vectorized(
     observed_powers    : (M,) observed sensor powers (dBm)
     cov_matrix         : (M, M) noise covariance matrix
     threshold          : minimum PMF value to retain
+    min_valid_sensors  : minimum number of sensors with A[j,i] > 0 required
+        for a cell to be eligible. Defaults to max(1, M // 2).
 
     Returns
     -------
     pmf : (N,) probability mass function over grid cells (flattened)
     """
-    t_hat = transmit_power_map.ravel()  # (N,)
+    t_hat = transmit_power_map.ravel()                              # (N,)
+    M, N = propagation_matrix.shape
 
-    # Path gain in dB: G[j, i] = 10*log10(A[j, i])
-    with np.errstate(divide='ignore'):
-        G = 10.0 * np.log10(np.maximum(propagation_matrix, 1e-20))  # (M, N)
+    if min_valid_sensors is None:
+        min_valid_sensors = max(1, M // 2)
 
-    # Predicted power at each sensor for each hypothesis
-    # predicted[j, i] = t_hat[i] + G[j, i]
-    error = (t_hat[np.newaxis, :] + G) - observed_powers[:, np.newaxis]  # (M, N)
+    # Validity mask: sensor j is informative for cell i iff A[j,i] > 0.
+    valid_mask = propagation_matrix > 0                             # (M, N)
+    n_valid = valid_mask.sum(axis=0)                                # (N,)
+    eligible = n_valid >= min_valid_sensors                         # (N,)
+
+    # Path gain in dB; log-of-zero is masked rather than clamped.
+    with np.errstate(divide='ignore', invalid='ignore'):
+        G = 10.0 * np.log10(np.where(valid_mask, propagation_matrix, 1.0))
+    G = np.where(valid_mask, G, 0.0)                                # (M, N)
+
+    # Residual at each (sensor, cell), zeroed at invalid entries so that
+    # the zero-fill does not contribute to the quadratic form.
+    error = np.where(
+        valid_mask,
+        (t_hat[np.newaxis, :] + G) - observed_powers[:, np.newaxis],
+        0.0,
+    )                                                               # (M, N)
 
     # Inverse covariance
     try:
@@ -99,17 +132,33 @@ def compute_pmf_vectorized(
     except np.linalg.LinAlgError:
         V_inv = np.linalg.pinv(cov_matrix)
 
-    # Quadratic form: e_i^T V^{-1} e_i for each hypothesis i
-    V_inv_error = V_inv @ error      # (M, N)
-    quad_forms = np.sum(error * V_inv_error, axis=0)  # (N,)
+    # Quadratic form with zero-filled invalid rows.
+    V_inv_error = V_inv @ error                                     # (M, N)
+    quad_sum = np.sum(error * V_inv_error, axis=0)                  # (N,)
 
-    # Log-likelihood (up to shared constant)
+    # Per-sensor normalization. Without this, cells with few valid sensors
+    # mechanically win the softmax because they sum over fewer residual
+    # terms. Scaling by M / n_valid puts every eligible cell on a common
+    # "full coverage equivalent" basis.
+    n_safe = np.maximum(n_valid, 1)
+    quad_forms = quad_sum * (M / n_safe)                            # (N,)
+
+    # Log-likelihood (up to shared constant), with ineligible cells masked
+    # out at -inf so they contribute zero mass to the softmax.
     log_lik = -0.5 * quad_forms
+    log_lik = np.where(eligible, log_lik, -np.inf)
 
-    # Numerically stable softmax -> PMF
-    log_lik -= np.max(log_lik)
-    pmf = np.exp(log_lik)
-    pmf /= np.sum(pmf)
+    finite = np.isfinite(log_lik)
+    if not np.any(finite):
+        return np.zeros(N, dtype=np.float64)
+
+    log_lik = log_lik - np.max(log_lik[finite])
+    pmf = np.where(finite, np.exp(log_lik), 0.0)
+
+    total = np.sum(pmf)
+    if total <= 0:
+        return np.zeros(N, dtype=np.float64)
+    pmf /= total
 
     # Threshold and renormalize
     pmf[pmf < threshold] = 0.0
@@ -229,16 +278,24 @@ def compute_peak_hypothesis_residual(
     Residual vector for the MAP/peak PMF hypothesis after closed-form power fit.
 
     This is useful for residual diagnostics because it isolates the residual
-    structure of the single hypothesis that the PMF ranks highest.
+    structure of the single hypothesis that the PMF ranks highest. Sensors
+    with zero path gain at the peak cell are treated as missing data and
+    excluded from the returned residual vector, matching the sensor-masking
+    semantics used in the fit and PMF computation.
     """
     t_hat = transmit_power_map.ravel()
     peak_idx = int(np.argmax(pmf))
 
+    col = propagation_matrix[:, peak_idx]
+    valid = col > 0
+    if not np.any(valid):
+        return np.zeros(0, dtype=np.float64)
+
     with np.errstate(divide='ignore'):
-        gain_db = 10.0 * np.log10(np.maximum(propagation_matrix[:, peak_idx], 1e-20))
+        gain_db = 10.0 * np.log10(col[valid])
 
     predicted = t_hat[peak_idx] + gain_db
-    return predicted - observed_powers
+    return predicted - observed_powers[valid]
 
 
 def summarize_residual_vector(residual: np.ndarray) -> Dict[str, float]:
